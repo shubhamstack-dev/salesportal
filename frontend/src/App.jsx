@@ -93,7 +93,7 @@ function SignIn({ mode, company, message, onDone }) {
   }
   return (
     <div className="login"><form onSubmit={submit} noValidate>
-      <div className="brand" style={{ padding: 0, color: 'var(--ink)' }}><div className="logo">{initials(company)}</div><div><b>{company}</b><small style={{ color: 'var(--muted)' }}>Sales portal</small></div></div>
+      <div className="brand-login"><img src="/logo.png" alt={company} /><small>Sales portal</small></div>
       <h1>{setup ? 'Create the administrator' : 'Sign in'}</h1>
       <p className="fine" style={{ margin: '-6px 0 0' }}>{setup ? 'First use. The administrator adds employees, who sign in with their own username.' : 'Use the username and password your administrator gave you.'}</p>
       {setup && <><label className="field">Company name<input className="inp" value={f.company} onChange={set('company')} /></label>
@@ -142,7 +142,7 @@ function Shell({ me, setMe, onSignOut }) {
     <SessionContext.Provider value={session}>
       <div className={`shell ${open ? 'open' : ''}`} onClick={(e) => { if (open && e.target.classList.contains('shell')) setOpen(false) }}>
         <aside className="side">
-          <div className="brand"><div className="logo">{initials(co)}</div><div><b>{co}</b><small>Sales portal</small></div></div>
+          <div className="brand brand-img"><div className="logo-card"><img src="/logo.png" alt={co} /></div><small>Sales portal</small></div>
           <nav className="nav" aria-label="Main">{visible.map((n, i) => n.grp
             ? (visible[i + 1] && !visible[i + 1].grp ? <div key={n.grp} className="grp">{n.grp}</div> : null)
             : <a key={n.id} href={`#/${n.id}`} className={page === n.id || page + 's' === n.id ? 'on' : ''}>{n.label}{counts[n.badge] ? <span className="cnt">{counts[n.badge]}</span> : null}</a>)}</nav>
