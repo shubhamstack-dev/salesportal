@@ -28,7 +28,7 @@ services:
     container_name: sp-backend
     restart: unless-stopped
     environment:
-      DATABASE_URL: mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db:3306/sales_portal?charset=utf8mb4
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD_URLENC:-${MYSQL_PASSWORD}}@db:3306/sales_portal?charset=utf8mb4
       JWT_SECRET: ${JWT_SECRET}
       JWT_HOURS: ${JWT_HOURS:-10}
       APP_TZ: ${APP_TZ:-Asia/Kolkata}
