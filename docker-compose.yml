@@ -1,0 +1,50 @@
+# MySQL + FastAPI middleware + React frontend.
+#   cp .env.example .env   (then change the passwords and secret)
+#   docker compose up -d --build
+# Open http://localhost:8080 (put it behind HTTPS for phones: browsers share location only over https)
+# Server: docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+services:
+  db:
+    image: mysql:8.0
+    container_name: sp-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_DATABASE: sales_portal
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      TZ: Asia/Kolkata
+    command: ["--character-set-server=utf8mb4", "--collation-server=utf8mb4_unicode_ci"]
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 5s
+      retries: 20
+
+  backend:
+    build: ./backend
+    container_name: sp-backend
+    restart: unless-stopped
+    environment:
+      DATABASE_URL: mysql+pymysql://${MYSQL_USER}:${MYSQL_PASSWORD}@db:3306/sales_portal?charset=utf8mb4
+      JWT_SECRET: ${JWT_SECRET}
+      JWT_HOURS: ${JWT_HOURS:-10}
+      APP_TZ: ${APP_TZ:-Asia/Kolkata}
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost:8080}
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build: ./frontend
+    container_name: sp-web
+    restart: unless-stopped
+    ports:
+      - "${APP_PORT:-8080}:80"
+    depends_on:
+      - backend
+
+volumes:
+  mysql_data:

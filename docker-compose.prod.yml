@@ -1,0 +1,16 @@
+# Server-only additions, used together with docker-compose.yml:
+#   docker compose -f docker-compose.yml -f docker-compose.prod.yml up -d --build
+#
+# ProjectSystem's Caddy (ps-web) owns ports 80/443 and the HTTPS certificates.
+# sp-web joins its network so Caddy can forward
+# salesportal.nexdaequmsupport.com -> sp-web:80.
+services:
+  frontend:
+    networks:
+      - default
+      - caddy
+
+networks:
+  caddy:
+    name: projectsystem_default
+    external: true
