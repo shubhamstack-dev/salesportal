@@ -6,7 +6,7 @@ from ..db import get_db
 from ..models import Attendance, AttendanceCorrection, ExpenseClaim, Payment, SalesDoc, User
 from ..security import can_approve_for, current_user, visible_user_ids
 from ..services.calc import day_points
-from ..services.common import f, local_today, to_local
+from ..services.common import f, local_today, pending_signups, to_local
 from ..services.dynamics import out_queues
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
@@ -57,4 +57,5 @@ def counts(db: Session = Depends(get_db), me: User = Depends(current_user)):
            "attendance": len([c for c in db.scalars(select(AttendanceCorrection).where(AttendanceCorrection.status == "pending")) if can_approve_for(db, me, c.user_id)])}
     if me.role == "admin":
         out["integration"] = sum(len(v) for v in out_queues(db).values())
+        out["employees"] = len(pending_signups(db))
     return out

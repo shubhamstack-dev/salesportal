@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import Customer, Grade, User, UserCustomer
 from ..security import ROLES, current_user, hash_password, require, visible_user_ids
-from ..services.common import f, get_or_404, get_settings, local_today, public_settings, put_settings, SECRET_KEYS
+from ..services.common import (f, get_or_404, get_settings, local_today, pending_signups, public_settings, put_settings,
+                               save_pending_signups, SECRET_KEYS)
 
 router = APIRouter(prefix="/api", tags=["organisation"])
 admin = require("admin")
@@ -42,7 +43,9 @@ def list_users(db: Session = Depends(get_db), me: User = Depends(current_user)):
     ids = visible_user_ids(db, me)
     users = db.scalars(select(User).order_by(User.name))
     if me.role == "admin":
-        return [user_out(u) for u in users]
+        pending = pending_signups(db)
+        rows = [{**user_out(u), "pending": u.id in pending} for u in users]
+        return sorted(rows, key=lambda r: not r["pending"])    # registration requests first
     return [{"id": u.id, "name": u.name, "emp_code": u.emp_code, "role": u.role, "phone": u.phone, "active": u.active}
             for u in users if u.id in ids]
 
@@ -95,8 +98,24 @@ def update_user(user_id: int, body: UserIn, db: Session = Depends(get_db), me: U
     u = get_or_404(db, User, user_id, "employee")
     username = _check(db, body, u, me)
     _apply(db, u, body, username)
+    pending = pending_signups(db)
+    if u.id in pending and u.active:          # approving a registration
+        save_pending_signups(db, pending - {u.id})
     db.commit()
     return user_out(u)
+
+
+@router.delete("/users/{user_id}")
+def reject_registration(user_id: int, db: Session = Depends(get_db), _=Depends(admin)):
+    """Only registration requests can be deleted; employees with history are made inactive instead."""
+    pending = pending_signups(db)
+    if user_id not in pending:
+        raise HTTPException(409, "Only registration requests can be deleted. Untick \"Can sign in\" instead.")
+    u = get_or_404(db, User, user_id, "employee")
+    db.delete(u)
+    save_pending_signups(db, pending - {user_id})
+    db.commit()
+    return {"ok": True}
 
 
 # ---------------- grades (expense policy)

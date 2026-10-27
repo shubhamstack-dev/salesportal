@@ -34,7 +34,7 @@ const NAV = [
   { id: 'hsn', label: 'HSN and GST', roles: ['admin', 'manager'] },
   { id: 'charges', label: 'Charges', roles: ['admin', 'manager'] },
   { grp: 'Administration' },
-  { id: 'employees', label: 'Employees and users', roles: ['admin'] },
+  { id: 'employees', label: 'Employees and users', roles: ['admin'], badge: 'employees' },
   { id: 'integration', label: 'Dynamics sync', roles: ['admin'], badge: 'integration' },
   { id: 'settings', label: 'Settings', roles: ['admin'] },
 ]
@@ -80,29 +80,50 @@ function Root() {
 
 function SignIn({ mode, company, message, onDone }) {
   const setup = mode === 'setup'
-  const [f, setF] = useState({ name: '', username: '', password: '', password2: '', company })
+  const [view, setView] = useState('login')          // login | register (ignored during first setup)
+  const register = !setup && view === 'register'
+  const blank = { name: '', username: '', phone: '', password: '', password2: '', company }
+  const [f, setF] = useState(blank)
   const [err, setErr] = useState(message)
+  const [info, setInfo] = useState('')
+  const [busy, setBusy] = useState(false)
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value })
+  const switchTo = (v) => { setView(v); setErr(''); setInfo(''); setF({ ...blank, username: v === 'login' ? f.username : '' }) }
   const submit = async (e) => {
     e.preventDefault()
-    if (setup && f.password !== f.password2) return setErr('The passwords do not match.')
+    if ((setup || register) && f.password !== f.password2) return setErr('The passwords do not match.')
+    setErr(''); setBusy(true)
     try {
+      if (register) {
+        const r = await api('/api/auth/register', { method: 'POST', body: { name: f.name, username: f.username, phone: f.phone, password: f.password } })
+        setView('login'); setF({ ...blank, username: f.username }); setInfo(r.message)
+        return
+      }
       onDone(await api(setup ? '/api/auth/setup' : '/api/auth/login', { method: 'POST',
         body: setup ? { name: f.name, username: f.username, password: f.password, company: f.company } : { username: f.username, password: f.password } }))
-    } catch (e2) { setErr(e2.message) }
+    } catch (e2) { setErr(e2.message) } finally { setBusy(false) }
   }
+  const heading = setup ? 'Create the administrator' : register ? 'Create an account' : 'Sign in'
+  const lead = setup ? 'First use. The administrator adds employees, who sign in with their own username.'
+    : register ? 'Your account can be used once an administrator approves it.'
+      : 'Use the username and password your administrator gave you.'
   return (
-    <div className="login"><form onSubmit={submit} noValidate>
+    <div className="login"><form onSubmit={submit} noValidate key={register ? 'r' : 'l'}>
       <div className="brand-login"><img src="/logo.png" alt={company} /><small>Sales portal</small></div>
-      <h1>{setup ? 'Create the administrator' : 'Sign in'}</h1>
-      <p className="fine" style={{ margin: '-6px 0 0' }}>{setup ? 'First use. The administrator adds employees, who sign in with their own username.' : 'Use the username and password your administrator gave you.'}</p>
-      {setup && <><label className="field">Company name<input className="inp" value={f.company} onChange={set('company')} /></label>
-        <label className="field">Full name<input className="inp" value={f.name} onChange={set('name')} autoFocus /></label></>}
-      <label className="field">Username<input className="inp" id="lUser" value={f.username} onChange={set('username')} autoCapitalize="none" autoComplete="username" autoFocus={!setup} /></label>
-      <label className="field">Password<input className="inp" id="lPw" type="password" value={f.password} onChange={set('password')} autoComplete={setup ? 'new-password' : 'current-password'} /></label>
-      {setup && <label className="field">Repeat password<input className="inp" type="password" value={f.password2} onChange={set('password2')} /></label>}
+      <div className="login-head"><h1>{heading}</h1><p className="fine">{lead}</p></div>
+      {info && <p className="note ok" role="status">{info}</p>}
+      {setup && <label className="field">Company name<input className="inp" value={f.company} onChange={set('company')} /></label>}
+      {(setup || register) && <label className="field">Full name<input className="inp" value={f.name} onChange={set('name')} autoComplete="name" autoFocus /></label>}
+      <label className="field">Username<input className="inp" id="lUser" placeholder={register ? 'Your e-mail works well' : undefined} value={f.username} onChange={set('username')} autoCapitalize="none" autoComplete="username" autoFocus={!setup && !register} /></label>
+      {register && <label className="field">Mobile<input className="inp" type="tel" value={f.phone} onChange={set('phone')} autoComplete="tel" /></label>}
+      <label className="field">Password<input className="inp" id="lPw" type="password" placeholder={setup || register ? 'At least 8 characters' : undefined} value={f.password} onChange={set('password')} autoComplete={setup || register ? 'new-password' : 'current-password'} /></label>
+      {(setup || register) && <label className="field">Repeat password<input className="inp" type="password" value={f.password2} onChange={set('password2')} autoComplete="new-password" /></label>}
       <p className="err">{err}</p>
-      <button className="btn pri lg">{setup ? 'Create and sign in' : 'Sign in'}</button>
+      <button className="btn pri lg" disabled={busy}>{setup ? 'Create and sign in' : register ? 'Register' : 'Sign in'}</button>
+      {!setup && <div className="login-alt">
+        <span>{register ? 'Already have an account?' : 'New here?'}</span>
+        <button type="button" className="btn lg" onClick={() => switchTo(register ? 'login' : 'register')}>{register ? 'Back to sign in' : 'Register'}</button>
+      </div>}
     </form></div>)
 }
 

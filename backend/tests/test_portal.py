@@ -211,3 +211,39 @@ def test_dynamics_round_trip(c, admin):
     assert s["waiting_file"] == 0 and all(v["count"] == 0 for v in s["out"].values())
     d = c.get("/api/dashboard", headers=H(admin)).json()
     assert d["staff"] == 2 and d["on_duty"] == 1 and d["collected"]["value"] == 5000
+
+
+def test_self_registration_needs_approval(c, admin):
+    body = {"name": "Neha Verma", "username": "Neha@SamuraiFoods.in", "phone": "9800000001", "password": "neha12345"}
+    r = c.post("/api/auth/register", json=body)
+    assert r.status_code == 200, r.text
+    assert c.post("/api/auth/register", json=body).status_code == 409          # same username again
+    assert c.post("/api/auth/register", json={**body, "username": "x y"}).status_code == 422
+    assert c.post("/api/auth/register", json={**body, "username": "short", "password": "123"}).status_code == 422
+
+    # cannot sign in yet, and says why
+    r = c.post("/api/auth/login", json={"username": "neha@samuraifoods.in", "password": "neha12345"})
+    assert r.status_code == 403 and "approval" in r.json()["detail"]
+
+    # the administrator sees it first, flagged, with a menu badge
+    assert c.get("/api/counts", headers=H(admin)).json()["employees"] == 1
+    users = c.get("/api/users", headers=H(admin)).json()
+    neha = users[0]
+    assert neha["username"] == "neha@samuraifoods.in" and neha["pending"] and not neha["active"]
+    assert neha["role"] == "rep" and neha["email"] == "neha@samuraifoods.in"
+
+    # approve: tick "Can sign in" and save
+    upd = {k: neha[k] for k in ["name", "username", "role", "emp_code", "phone", "email", "territory", "customer_ids"]}
+    r = c.patch(f"/api/users/{neha['id']}", json={**upd, "active": True}, headers=H(admin))
+    assert r.status_code == 200, r.text
+    assert c.get("/api/counts", headers=H(admin)).json()["employees"] == 0
+    login(c, "neha@samuraifoods.in", "neha12345")
+    # approved employees cannot be deleted, only made inactive
+    assert c.delete(f"/api/users/{neha['id']}", headers=H(admin)).status_code == 409
+
+    # reject: a second request is deleted
+    c.post("/api/auth/register", json={**body, "name": "Spam", "username": "spam1"})
+    spam = next(u for u in c.get("/api/users", headers=H(admin)).json() if u["username"] == "spam1")
+    assert c.delete(f"/api/users/{spam['id']}", headers=H(admin)).status_code == 200
+    assert not any(u["username"] == "spam1" for u in c.get("/api/users", headers=H(admin)).json())
+    assert c.get("/api/counts", headers=H(admin)).json()["employees"] == 0

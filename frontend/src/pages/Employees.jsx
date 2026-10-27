@@ -14,12 +14,12 @@ export default function Employees() {
       {!rows ? <div className="loading">Loading…</div> : <div className="scroll"><table className="t"><thead><tr><th>Employee</th><th>Code</th><th>Username</th><th>Role</th><th>Grade</th><th>Reports to</th><th>Customers</th><th>Status</th></tr></thead><tbody>
         {rows.map((u) => <tr key={u.id} className="click" onClick={() => setEdit(u)}><td><div className="tools" style={{ flexWrap: 'nowrap' }}><div className="avatar">{initials(u.name)}</div><div><b>{u.name}</b><div className="fine">{u.email}</div></div></div></td>
           <td className="mono">{u.emp_code}</td><td>{u.username}</td><td>{u.role_label}</td><td>{u.grade || <span className="badge warn">No grade</span>}</td><td>{rows.find((x) => x.id === u.manager_id)?.name || '—'}</td>
-          <td>{u.role === 'rep' ? (u.customer_ids.length ? `${u.customer_ids.length} assigned` : 'All') : '—'}</td><td>{u.active ? <span className="badge ok">Active</span> : <span className="badge bad">Inactive</span>}</td></tr>)}</tbody></table></div>}</div>
+          <td>{u.role === 'rep' ? (u.customer_ids.length ? `${u.customer_ids.length} assigned` : 'All') : '—'}</td><td>{u.pending ? <span className="badge warn">Awaiting approval</span> : u.active ? <span className="badge ok">Active</span> : <span className="badge bad">Inactive</span>}</td></tr>)}</tbody></table></div>}</div>
     <EmployeeDialog u={edit} all={rows || []} grades={grades || []} roles={roles} onClose={() => setEdit(null)} onSaved={() => { setEdit(null); reload() }} /></>)
 }
 
 function EmployeeDialog({ u, all, grades, roles, onClose, onSaved }) {
-  const { toast } = useUi()
+  const { toast, confirm } = useUi()
   const [custs] = useLoad(() => (u ? api('/api/customers') : Promise.resolve([])), [!!u])
   const [f, setF] = useState(null); const [err, setErr] = useState(''); const [filter, setFilter] = useState('')
   useEffect(() => {
@@ -35,8 +35,13 @@ function EmployeeDialog({ u, all, grades, roles, onClose, onSaved }) {
     const body = { ...f, manager_id: f.manager_id ? +f.manager_id : null, grade: f.grade || null, password: f.password || null }
     try { await api(u.id ? `/api/users/${u.id}` : '/api/users', { method: u.id ? 'PATCH' : 'POST', body }); toast('Employee saved'); onSaved() } catch (e2) { setErr(e2.message) }
   }
+  const reject = async () => {
+    if (!(await confirm(`Reject ${u.name}?`, 'The registration request will be deleted.', 'Reject'))) return
+    try { await api(`/api/users/${u.id}`, { method: 'DELETE' }); toast('Registration rejected'); onSaved() } catch (e2) { setErr(e2.message) }
+  }
   const sel = new Set(f.customer_ids)
   return <Modal open onClose={onClose} wide><form className="dlg" onSubmit={save} noValidate><h2>{u.id ? `Edit ${u.name}` : 'Add employee'}</h2>
+    {u.pending && <div className="note warn">Registration request from {u.joined_on}. Check the details, set the role, employee code and grade, then tick <b>Can sign in</b> and save to approve it.</div>}
     <div className="form">
       <label className="field">Full name<input className="inp" name="name" value={f.name} onChange={set('name')} autoFocus /></label>
       <label className="field">Employee code<input className="inp" name="emp_code" value={f.emp_code} onChange={set('emp_code')} placeholder="As in Dynamics" /></label>
@@ -55,5 +60,5 @@ function EmployeeDialog({ u, all, grades, roles, onClose, onSaved }) {
       <div style={{ maxHeight: 200, overflow: 'auto', display: 'grid', gridTemplateColumns: 'repeat(auto-fill,minmax(220px,1fr))', gap: '2px 12px' }}>
         {(custs || []).filter((c) => !filter || `${c.code} ${c.name} ${c.city}`.toLowerCase().includes(filter.toLowerCase())).map((c) => <label key={c.id} className="chk"><input type="checkbox" checked={sel.has(c.id)}
           onChange={(e) => setF({ ...f, customer_ids: e.target.checked ? [...f.customer_ids, c.id] : f.customer_ids.filter((x) => x !== c.id) })} /> {c.code} {c.name}</label>)}</div></fieldset>}
-    <p className="err">{err}</p><div className="btns"><button type="button" className="btn ghost" onClick={onClose}>Cancel</button><button className="btn pri">Save</button></div></form></Modal>
+    <p className="err">{err}</p><div className="btns">{u.pending && <button type="button" className="btn danger" onClick={reject} style={{ marginRight: 'auto' }}>Reject</button>}<button type="button" className="btn ghost" onClick={onClose}>Cancel</button><button className="btn pri">{u.pending && f.active ? 'Approve' : 'Save'}</button></div></form></Modal>
 }

@@ -186,6 +186,12 @@ dialog::backdrop{background:rgba(10,15,25,.5)}
 .login{min-height:100vh;display:grid;place-items:center;padding:20px;background:linear-gradient(160deg,var(--side) 0 45%,var(--bg) 45%)}
 .login form{width:min(400px,100%);background:var(--surface);border-radius:14px;padding:26px;display:flex;flex-direction:column;gap:13px;box-shadow:0 30px 80px -30px rgba(0,0,0,.5)}
 .login h1{margin:0;font-size:22px}
+.login-head{text-align:center}
+.login-head p{margin:4px 0 0}
+.login .note{margin:0}
+.note.ok{border-color:var(--ok);background:var(--ok-soft)}
+.login .btn.lg{justify-content:center;width:100%}
+.login-alt{display:flex;flex-direction:column;align-items:stretch;gap:8px;padding-top:12px;border-top:1px solid var(--rule);text-align:center;font-size:13px;color:var(--muted)}
 .err{color:var(--bad);font-size:13px;margin:0;min-height:1em}
 .steps{display:flex;gap:10px;flex-wrap:wrap;counter-reset:s}
 .sync{border:1px solid var(--rule);border-radius:9px;padding:12px 14px;display:flex;gap:12px;align-items:center;flex-wrap:wrap}

@@ -139,3 +139,22 @@ def get_or_404(db: Session, model, id_, what: str):
     if not obj:
         raise HTTPException(404, f"That {what} does not exist. Reload the page.")
     return obj
+
+
+# ---------------- self-registration requests (kept in app_settings, so no table change)
+SIGNUP_KEY = "signup_requests"
+MAX_PENDING_SIGNUPS = 50
+
+
+def pending_signups(db: Session) -> set[int]:
+    row = db.get(AppSetting, SIGNUP_KEY)
+    return set(row.value.get("ids", [])) if row else set()
+
+
+def save_pending_signups(db: Session, ids: set[int]) -> None:
+    row = db.get(AppSetting, SIGNUP_KEY)
+    value = {"ids": sorted(ids)}
+    if row:
+        row.value = value
+    else:
+        db.add(AppSetting(key=SIGNUP_KEY, value=value))
