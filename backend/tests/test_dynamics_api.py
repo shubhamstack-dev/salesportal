@@ -210,3 +210,24 @@ def test_standard_api_names_still_work(c):
     connect(c, customers="customers")
     p = c.post("/api/integration/import/customers/api").json()
     assert p["map"]["code"] == "number" and p["map"]["name"] == "displayName" and p["result"]["updated"] == 1
+
+
+def test_gst_rate_entered_per_gst_group(c):
+    connect(c)
+    p = c.post("/api/integration/import/hsn/api").json()
+    groups = {g["code"]: g for g in p["gst_groups"]}
+    assert groups["GST5"]["rate"] == 5 and groups["FOOD"]["rate"] == 0 and not groups["FOOD"]["set"]
+    assert any('"FOOD"' in e for e in p["result"]["errors"])
+    # the administrator enters the rate for FOOD; the preview no longer warns
+    p2 = c.post("/api/integration/import/hsn/preview", json={"import_id": p["import_id"], "map": p["map"], "gst_rates": {"FOOD": 18}}).json()
+    assert {g["code"]: g["rate"] for g in p2["gst_groups"]}["FOOD"] == 18 and not p2["result"]["errors"]
+    c.post("/api/integration/import/hsn/apply", json={"import_id": p["import_id"], "map": p["map"], "gst_rates": {"FOOD": 18}})
+    with SessionLocal() as db:
+        assert float(db.get(HsnCode, "19059090").rate) == 18
+    # remembered: the next download (and Download all) use it without asking
+    p3 = c.post("/api/integration/import/hsn/api").json()
+    assert {g["code"]: g for g in p3["gst_groups"]}["FOOD"]["set"] and not p3["result"]["errors"]
+    res = {x["entity"]: x for x in c.post("/api/integration/pull-all").json()["results"]}
+    assert not res["hsn"]["errors"]
+    with SessionLocal() as db:
+        assert float(db.get(HsnCode, "19059090").rate) == 18 and float(db.get(HsnCode, "16010000").rate) == 5

@@ -14,16 +14,21 @@ router = APIRouter(prefix="/api/integration", tags=["integration"])
 admin = require("admin")
 
 
-def _preview(db: Session, ent: str, key: str, si: int | None, mapping: dict | None):
+def _rates(db: Session, given: dict | None) -> dict:
+    return {**(get_settings(db)["dynamics"].get("gst_rates") or {}), **{str(k).strip(): v for k, v in (given or {}).items() if str(k).strip()}}
+
+
+def _preview(db: Session, ent: str, key: str, si: int | None, mapping: dict | None, gst_rates: dict | None = None):
     data = D.unstash(key)
     sheets = data["sheets"]
     si = D.pick_sheet(ent, sheets) if si is None else max(0, min(si, len(sheets) - 1))
     sh = sheets[si]
     from_api = data["source"].startswith("Dynamics API")
     m = mapping or (D.api_map(get_settings(db), ent, sh["headers"]) if from_api else D.auto_map(ent, sh["headers"]))
-    res = D.apply_rows(db, ent, sh["rows"], m, dry=True)
+    rates = _rates(db, gst_rates)
+    res = D.apply_rows(db, ent, sh["rows"], m, dry=True, gst_rates=rates)
     db.rollback()
-    return {"import_id": key, "entity": ent, "label": D.ENT[ent]["label"], "source": data["source"], "sheet": si,
+    return {"import_id": key, "gst_groups": D.gst_groups(sh["rows"], m, rates) if ent == "hsn" else [], "entity": ent, "label": D.ENT[ent]["label"], "source": data["source"], "sheet": si,
             "sheets": [{"name": s["name"], "rows": len(s["rows"])} for s in sheets], "headers": sh["headers"], "fields": list(D.ENT[ent]["fields"]),
             "map": m, "result": res}
 
@@ -59,12 +64,13 @@ class MapIn(BaseModel):
     import_id: str
     sheet: int | None = None
     map: dict | None = None
+    gst_rates: dict | None = None
 
 
 @router.post("/import/{ent}/preview")
 def remap(ent: str, body: MapIn, db: Session = Depends(get_db), _=Depends(admin)):
     _ent(ent)
-    return _preview(db, ent, body.import_id, body.sheet, body.map)
+    return _preview(db, ent, body.import_id, body.sheet, body.map, body.gst_rates)
 
 
 @router.post("/import/{ent}/apply")
@@ -77,10 +83,15 @@ def apply(ent: str, body: MapIn, db: Session = Depends(get_db), me: User = Depen
     from_api = data["source"].startswith("Dynamics API")
     s = get_settings(db)
     m = body.map or (D.api_map(s, ent, sh["headers"]) if from_api else D.auto_map(ent, sh["headers"]))
-    res = D.apply_rows(db, ent, sh["rows"], m, dry=False)
-    patch = {"sync_info": {**s.get("sync_info", {}), ent: iso_utc(now_utc())}}
+    rates = _rates(db, body.gst_rates)
+    res = D.apply_rows(db, ent, sh["rows"], m, dry=False, gst_rates=rates)
+    patch = {"sync_info": {**s.get("sync_info", {}), ent: iso_utc(now_utc())}, "dynamics": {}}
     if from_api:      # remember the columns, so "Download all" and the next download use them
-        patch["dynamics"] = {"api_map": {**(s["dynamics"].get("api_map") or {}), ent: m}}
+        patch["dynamics"]["api_map"] = {**(s["dynamics"].get("api_map") or {}), ent: m}
+    if ent == "hsn" and body.gst_rates:   # and the GST rate of each GST group
+        patch["dynamics"]["gst_rates"] = rates
+    if not patch["dynamics"]:
+        del patch["dynamics"]
     put_settings(db, patch)
     log(db, "in", D.ENT[ent]["label"], res["added"] + res["updated"], "warning" if res["skipped"] else "ok",
         f"{data['source']}: {res['added']} new, {res['updated']} updated, {res['skipped']} skipped", me)
@@ -114,13 +125,14 @@ def pull_all(db: Session = Depends(get_db), me: User = Depends(admin)):
                 f"Columns not found ({', '.join(miss)}). Use Download via API once and choose them."
             out.append({"entity": ent, "label": label, "status": "error", "message": msg})
             continue
-        dry = D.apply_rows(db, ent, rows, m, dry=True)
+        rates = s["dynamics"].get("gst_rates") or {}
+        dry = D.apply_rows(db, ent, rows, m, dry=True, gst_rates=rates)
         db.rollback()
         if ent in ("prices", "charges") and not dry["added"]:     # these replace everything; never wipe them with nothing
             out.append({"entity": ent, "label": label, "status": "error", "message": f"No usable rows ({dry['skipped']} skipped); nothing replaced",
                         "errors": dry["errors"][:5]})
             continue
-        res = D.apply_rows(db, ent, rows, m, dry=False)
+        res = D.apply_rows(db, ent, rows, m, dry=False, gst_rates=rates)
         if ent == "materials":
             items = (rows, m)
         if ent == "prices" and items:

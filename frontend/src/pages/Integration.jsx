@@ -4,7 +4,7 @@ import { useSession } from '../session'
 import { Modal, useLoad, useUi } from '../ui'
 
 const FLABEL = { code: 'Code / No.', name: 'Name', gstin: 'GSTIN', state: 'State', address: 'Address', city: 'City', pin: 'PIN', phone: 'Phone', email: 'E-mail', price_group: 'Price group',
-  terms: 'Payment terms', status: 'Status (only Active used)', price_type: 'Price type (purchase left out)', gst_group: 'GST group (rate read from it)', credit_limit: 'Credit limit', balance: 'Balance', blocked: 'Blocked', uom: 'Unit', hsn: 'HSN/SAC', category: 'Category', price: 'Unit price', material: 'Item no.',
+  terms: 'Payment terms', status: 'Status (only Active used)', price_type: 'Price type (purchase left out)', gst_group: 'GST group', credit_limit: 'Credit limit', balance: 'Balance', blocked: 'Blocked', uom: 'Unit', hsn: 'HSN/SAC', category: 'Category', price: 'Unit price', material: 'Item no.',
   value: 'Value / rate', type: 'Applies to (type)', min_qty: 'Minimum quantity', from: 'Valid from', to: 'Valid to', description: 'Description', rate: 'GST %', cess: 'Cess %',
   calc: 'Calculation', sign: 'Charge or discount', stage: 'Before / after GST', auto: 'Apply to every order', active: 'Active / blocked' }
 
@@ -80,14 +80,22 @@ function PullAllDialog({ all, onClose }) {
 function ImportDialog({ imp, setImp, onDone }) {
   const { toast } = useUi()
   if (!imp) return <Modal open={false} />
-  const remap = async (patch) => { try { setImp(await api(`/api/integration/import/${imp.entity}/preview`, { method: 'POST', body: { import_id: imp.import_id, sheet: imp.sheet, map: imp.map, ...patch } })) } catch (e) { toast(e.message) } }
-  const apply = async () => { try { const r = await api(`/api/integration/import/${imp.entity}/apply`, { method: 'POST', body: { import_id: imp.import_id, sheet: imp.sheet, map: imp.map } }); setImp(null); toast(`${imp.label}: ${r.added} new, ${r.updated} updated`); onDone() } catch (e) { toast(e.message) } }
+  const rates = imp.rates || Object.fromEntries((imp.gst_groups || []).map((g) => [g.code, g.rate]))
+  const remap = async (patch) => { try { const n = await api(`/api/integration/import/${imp.entity}/preview`, { method: 'POST', body: { import_id: imp.import_id, sheet: imp.sheet, map: imp.map, gst_rates: rates, ...patch } }); setImp({ ...n, rates: patch.gst_rates || rates }) } catch (e) { toast(e.message) } }
+  const apply = async () => { try { const r = await api(`/api/integration/import/${imp.entity}/apply`, { method: 'POST', body: { import_id: imp.import_id, sheet: imp.sheet, map: imp.map, gst_rates: imp.gst_groups?.length ? rates : null } }); setImp(null); toast(`${imp.label}: ${r.added} new, ${r.updated} updated`); onDone() } catch (e) { toast(e.message) } }
+  const setRate = (code, v) => setImp({ ...imp, rates: { ...rates, [code]: v } })
   const r = imp.result
-  return <Modal open onClose={() => setImp(null)} wide><div className="dlg"><h2>Download {imp.label.toLowerCase()} from Dynamics</h2><p className="fine" style={{ margin: '-8px 0 0' }}>{imp.source}</p>
+  return <Modal open onClose={() => setImp(null)} wide><div className="dlg"><h2>Download {imp.label} from Dynamics</h2><p className="fine" style={{ margin: '-8px 0 0' }}>{imp.source}</p>
     {imp.sheets.length > 1 && <label className="field">Sheet<select className="inp" value={imp.sheet} onChange={(e) => remap({ sheet: +e.target.value, map: null })}>{imp.sheets.map((s, i) => <option key={i} value={i}>{s.name} ({s.rows} rows)</option>)}</select></label>}
     <div><b style={{ fontSize: 13 }}>Columns</b><p className="fine" style={{ margin: '2px 0 8px' }}>Matched automatically by name. Change any that are wrong.</p>
       <div className="form">{imp.fields.map((k) => <label key={k} className="field">{FLABEL[k] || k}<select className="inp" value={imp.map[k] || ''} onChange={(e) => remap({ map: { ...imp.map, [k]: e.target.value } })}>
         <option value="">Not in the file</option>{imp.headers.map((h) => <option key={h}>{h}</option>)}</select></label>)}</div></div>
+    {imp.gst_groups?.length > 0 && <div><b style={{ fontSize: 13 }}>GST rate of each GST group</b>
+      <p className="fine" style={{ margin: '2px 0 8px' }}>Business Central keeps GST rates in its tax engine, not on the HSN code, so enter each group's total GST % once (for example 5, 12, 18). It is remembered for every later download.</p>
+      <div className="scroll"><table className="t"><thead><tr><th>GST group</th><th className="r">HSN codes</th><th style={{ width: 130 }}>GST %</th></tr></thead><tbody>
+        {imp.gst_groups.map((g) => <tr key={g.code}><td className="mono">{g.code || '(blank)'}</td><td className="r">{g.hsn}</td>
+          <td><input className="inp" type="number" min="0" max="40" step="0.01" value={rates[g.code] ?? ''} onChange={(e) => setRate(g.code, e.target.value === '' ? '' : +e.target.value)}
+            onBlur={() => remap({ gst_rates: rates })} style={{ width: 110 }} /></td></tr>)}</tbody></table></div></div>}
     <div className={`note ${r.errors.length ? 'warn' : ''}`}>{imp.entity === 'prices' ? `${r.added} prices will replace the ${r.updated} in the portal` : `${r.added} new, ${r.updated} updated`}{r.skipped ? `, ${r.skipped} rows skipped` : ''}.
       {r.errors.slice(0, 6).map((e) => <div key={e}>{e}</div>)}</div>
     <div className="btns"><button className="btn ghost" onClick={() => setImp(null)}>Cancel</button><button className="btn pri" disabled={!(r.added + r.updated)} onClick={apply}>Apply</button></div></div></Modal>

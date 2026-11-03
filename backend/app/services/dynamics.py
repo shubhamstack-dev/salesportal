@@ -196,7 +196,28 @@ def rate_from_group(v) -> float:
     return float(m[0]) if m and float(m[0]) in GST_RATES else 0.0
 
 
-def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool) -> dict:
+def group_rate(grp: str, gst_rates: dict | None) -> float:
+    """The rate entered for this GST group in the portal, else read from the group's name (GST18 -> 18)."""
+    rates = {str(k).strip().upper(): v for k, v in (gst_rates or {}).items()}
+    if grp.strip().upper() in rates:
+        return _num(rates[grp.strip().upper()])
+    return rate_from_group(grp)
+
+
+def gst_groups(rows: list[dict], m: dict, gst_rates: dict | None) -> list[dict]:
+    """The GST groups used by the downloaded HSN codes, with the rate that will be applied, for the import dialog."""
+    col = m.get("gst_group")
+    if not col or m.get("rate"):
+        return []
+    seen: dict[str, int] = {}
+    for r in rows:
+        g = _s(r.get(col))
+        seen[g] = seen.get(g, 0) + 1
+    known = {str(k).strip().upper() for k in (gst_rates or {})}
+    return [{"code": g, "hsn": n, "rate": group_rate(g, gst_rates), "set": g.upper() in known} for g, n in sorted(seen.items())]
+
+
+def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_rates: dict | None = None) -> dict:
     """Upserts the rows (or only counts them when dry). Returns added, updated, skipped and first errors."""
     get = lambda r, k: r.get(m.get(k)) if m.get(k) else None  # noqa: E731
     res = {"added": 0, "updated": 0, "skipped": 0, "errors": []}
@@ -295,11 +316,11 @@ def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool) -> d
                 skip(i, f'"{code}" is not an HSN/SAC code'); continue
             h = db.get(HsnCode, code)
             res["updated" if h else "added"] += 1
-            rate = _num(get(r, "rate")) if m.get("rate") else rate_from_group(get(r, "gst_group"))
             grp = _s(get(r, "gst_group"))
-            if not m.get("rate") and not rate and not re.search(r"exempt|nil|zero|^0+(\.0+)?%?$|non.?gst", grp, re.I) and len(res["errors"]) < 20:
-                res["errors"].append(f"Row {i + 2}: HSN {code} gets 0% GST: no GST rate column, and the rate cannot be read from GST group "
-                                     f"\"{grp or 'blank'}\". Choose the GST % column, or import HSN rates from a file.")
+            rate = _num(get(r, "rate")) if m.get("rate") else group_rate(grp, gst_rates)
+            if not m.get("rate") and not rate and grp.upper() not in {k.upper() for k in (gst_rates or {})} \
+                    and not re.search(r"exempt|nil|zero|^0+(\.0+)?%?$|non.?gst", grp, re.I) and len(res["errors"]) < 20:
+                res["errors"].append(f"Row {i + 2}: HSN {code} gets 0% GST: enter the rate for GST group \"{grp or 'blank'}\" below.")
             if dry:
                 continue
             h = h or HsnCode(code=code)

@@ -21,7 +21,7 @@ DEFAULT_SETTINGS = {
     "maps_key": "", "geofence_m": 300,
     "dynamics": {"product": "bc", "base_url": "", "token": "", "tenant_id": "", "client_id": "", "client_secret": "",
                  "scope": "https://api.businesscentral.dynamics.com/.default", "payments_negative": True,
-                 "api_map": {},
+                 "api_map": {}, "gst_rates": {},
                  "ep": {"customers": "customers", "materials": "items", "attributes": "", "prices": "", "hsn": "", "charges": "",
                         "quotes": "salesQuotes", "orders": "salesOrders", "payments": "", "expenses": ""}},
 }
