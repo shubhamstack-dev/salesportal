@@ -231,3 +231,32 @@ def test_gst_rate_entered_per_gst_group(c):
     assert not res["hsn"]["errors"]
     with SessionLocal() as db:
         assert float(db.get(HsnCode, "19059090").rate) == 18 and float(db.get(HsnCode, "16010000").rate) == 5
+
+
+def test_rate_per_hsn_code_when_page_has_no_gst_group(c, monkeypatch):
+    no_group = [{k: v for k, v in r.items() if k != "GST_Group_Code"} for r in HSN]
+    monkeypatch.setitem(PAGES, "HSN_SAC", no_group)
+    connect(c)
+    p = c.post("/api/integration/import/hsn/api").json()
+    assert not p["map"]["gst_group"]
+    keys = {g["code"] for g in p["gst_groups"]}
+    assert keys == {"HSN 16010000", "HSN 21039090", "HSN 07019000", "HSN 19059090"} and all(g["by_hsn"] for g in p["gst_groups"])
+    assert len(p["result"]["errors"]) == 4
+    rates = {"HSN 16010000": 5, "HSN 21039090": 18, "HSN 07019000": 0, "HSN 19059090": 12}
+    p2 = c.post("/api/integration/import/hsn/preview", json={"import_id": p["import_id"], "map": p["map"], "gst_rates": rates}).json()
+    assert not p2["result"]["errors"]
+    c.post("/api/integration/import/hsn/apply", json={"import_id": p["import_id"], "map": p["map"], "gst_rates": rates})
+    with SessionLocal() as db:
+        assert float(db.get(HsnCode, "19059090").rate) == 12 and float(db.get(HsnCode, "16010000").rate) == 5
+    res = {x["entity"]: x for x in c.post("/api/integration/pull-all").json()["results"]}
+    assert not res["hsn"]["errors"]
+    with SessionLocal() as db:
+        assert float(db.get(HsnCode, "19059090").rate) == 12
+
+
+def test_blank_gst_group_can_be_given_a_rate(c, monkeypatch):
+    blank = [{**r, "GST_Group_Code": ""} for r in HSN]
+    monkeypatch.setitem(PAGES, "HSN_SAC", blank)
+    connect(c)
+    p = c.post("/api/integration/import/hsn/api").json()
+    assert p["map"]["gst_group"] == "GST_Group_Code" and all(g["by_hsn"] for g in p["gst_groups"])

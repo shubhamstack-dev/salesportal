@@ -196,25 +196,37 @@ def rate_from_group(v) -> float:
     return float(m[0]) if m and float(m[0]) in GST_RATES else 0.0
 
 
-def group_rate(grp: str, gst_rates: dict | None) -> float:
-    """The rate entered for this GST group in the portal, else read from the group's name (GST18 -> 18)."""
+BLANK = "(blank)"
+
+
+def rate_key(grp: str, code: str) -> str:
+    """The key a GST rate is entered under: the GST group, or the HSN code itself when Dynamics sends no group."""
+    return grp.strip() if grp.strip() else f"HSN {code}"
+
+
+def group_rate(key: str, gst_rates: dict | None) -> float:
+    """The rate entered in the portal for this GST group (or HSN code), else read from the group's name (GST18 -> 18)."""
     rates = {str(k).strip().upper(): v for k, v in (gst_rates or {}).items()}
-    if grp.strip().upper() in rates:
-        return _num(rates[grp.strip().upper()])
-    return rate_from_group(grp)
+    if key.strip().upper() in rates and rates[key.strip().upper()] not in ("", None):
+        return _num(rates[key.strip().upper()])
+    return 0.0 if key.startswith("HSN ") else rate_from_group(key)
 
 
 def gst_groups(rows: list[dict], m: dict, gst_rates: dict | None) -> list[dict]:
-    """The GST groups used by the downloaded HSN codes, with the rate that will be applied, for the import dialog."""
-    col = m.get("gst_group")
-    if not col or m.get("rate"):
+    """What a GST rate has to be entered for in the import dialog: each GST group, or each HSN code when the
+    HSN page sends no GST group."""
+    if m.get("rate") or not m.get("code"):
         return []
     seen: dict[str, int] = {}
     for r in rows:
-        g = _s(r.get(col))
-        seen[g] = seen.get(g, 0) + 1
-    known = {str(k).strip().upper() for k in (gst_rates or {})}
-    return [{"code": g, "hsn": n, "rate": group_rate(g, gst_rates), "set": g.upper() in known} for g, n in sorted(seen.items())]
+        code = re.sub(r"\.0+$", "", _s(r.get(m["code"])))
+        if not re.fullmatch(r"\d{4,8}", code):
+            continue
+        k = rate_key(_s(r.get(m["gst_group"])) if m.get("gst_group") else "", code)
+        seen[k] = seen.get(k, 0) + 1
+    known = {str(k).strip().upper() for k, v in (gst_rates or {}).items() if v not in ("", None)}
+    return [{"code": k, "hsn": n, "rate": group_rate(k, gst_rates), "set": k.upper() in known, "by_hsn": k.startswith("HSN ")}
+            for k, n in sorted(seen.items())]
 
 
 def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_rates: dict | None = None) -> dict:
@@ -316,11 +328,13 @@ def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_
                 skip(i, f'"{code}" is not an HSN/SAC code'); continue
             h = db.get(HsnCode, code)
             res["updated" if h else "added"] += 1
-            grp = _s(get(r, "gst_group"))
-            rate = _num(get(r, "rate")) if m.get("rate") else group_rate(grp, gst_rates)
-            if not m.get("rate") and not rate and grp.upper() not in {k.upper() for k in (gst_rates or {})} \
-                    and not re.search(r"exempt|nil|zero|^0+(\.0+)?%?$|non.?gst", grp, re.I) and len(res["errors"]) < 20:
-                res["errors"].append(f"Row {i + 2}: HSN {code} gets 0% GST: enter the rate for GST group \"{grp or 'blank'}\" below.")
+            key = rate_key(_s(get(r, "gst_group")), code)
+            rate = _num(get(r, "rate")) if m.get("rate") else group_rate(key, gst_rates)
+            entered = {str(k).strip().upper() for k, v in (gst_rates or {}).items() if v not in ("", None)}
+            if not m.get("rate") and not rate and key.upper() not in entered \
+                    and not re.search(r"exempt|nil|zero|^0+(\.0+)?%?$|non.?gst", key, re.I) and len(res["errors"]) < 20:
+                res["errors"].append(f"Row {i + 2}: HSN {code} gets 0% GST: enter the GST % for "
+                                     f"{key if key.startswith('HSN ') else 'GST group ' + chr(34) + key + chr(34)} below.")
             if dry:
                 continue
             h = h or HsnCode(code=code)
@@ -452,7 +466,7 @@ def api_map(s: dict, ent: str, headers: list[str]) -> dict:
     """The columns chosen the last time this master came from the API, where they still exist; the rest automatic."""
     auto = auto_map(ent, headers)
     saved = (s["dynamics"].get("api_map") or {}).get(ent) or {}
-    return {k: (saved[k] if k in saved and (saved[k] == "" or saved[k] in headers) else v) for k, v in auto.items()}
+    return {k: (saved[k] if saved.get(k) and saved[k] in headers else v) for k, v in auto.items()}
 
 
 def item_price_fallback(db: Session, rows: list[dict], m: dict) -> int:

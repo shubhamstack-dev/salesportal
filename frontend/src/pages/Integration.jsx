@@ -90,9 +90,9 @@ function ImportDialog({ imp, setImp, onDone }) {
     <div><b style={{ fontSize: 13 }}>Columns</b><p className="fine" style={{ margin: '2px 0 8px' }}>Matched automatically by name. Change any that are wrong.</p>
       <div className="form">{imp.fields.map((k) => <label key={k} className="field">{FLABEL[k] || k}<select className="inp" value={imp.map[k] || ''} onChange={(e) => remap({ map: { ...imp.map, [k]: e.target.value } })}>
         <option value="">Not in the file</option>{imp.headers.map((h) => <option key={h}>{h}</option>)}</select></label>)}</div></div>
-    {imp.gst_groups?.length > 0 && <div><b style={{ fontSize: 13 }}>GST rate of each GST group</b>
-      <p className="fine" style={{ margin: '2px 0 8px' }}>Business Central keeps GST rates in its tax engine, not on the HSN code, so enter each group's total GST % once (for example 5, 12, 18). It is remembered for every later download.</p>
-      <div className="scroll"><table className="t"><thead><tr><th>GST group</th><th className="r">HSN codes</th><th style={{ width: 130 }}>GST %</th></tr></thead><tbody>
+    {imp.gst_groups?.length > 0 && <div><b style={{ fontSize: 13 }}>{imp.gst_groups[0].by_hsn ? 'GST rate of each HSN code' : 'GST rate of each GST group'}</b>
+      <p className="fine" style={{ margin: '2px 0 8px' }}>Business Central keeps GST rates in its tax engine, not on the HSN code{imp.gst_groups[0].by_hsn ? ', and this page sends no GST group' : ''}, so enter the total GST % once (IGST, or CGST + SGST: for example 5, 12, 18). It is remembered for every later download.</p>
+      <div className="scroll"><table className="t"><thead><tr><th>{imp.gst_groups[0].by_hsn ? 'HSN code' : 'GST group'}</th><th className="r">HSN codes</th><th style={{ width: 130 }}>GST %</th></tr></thead><tbody>
         {imp.gst_groups.map((g) => <tr key={g.code}><td className="mono">{g.code || '(blank)'}</td><td className="r">{g.hsn}</td>
           <td><input className="inp" type="number" min="0" max="40" step="0.01" value={rates[g.code] ?? ''} onChange={(e) => setRate(g.code, e.target.value === '' ? '' : +e.target.value)}
             onBlur={() => remap({ gst_rates: rates })} style={{ width: 110 }} /></td></tr>)}</tbody></table></div></div>}
