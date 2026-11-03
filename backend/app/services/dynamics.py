@@ -14,6 +14,7 @@ import re
 import tempfile
 import time
 import uuid
+from urllib.parse import quote
 from datetime import date, datetime
 
 import httpx
@@ -30,34 +31,37 @@ ENT = {
         "code": ["No.", "No", "Customer No.", "Customer Code", "Code", "number", "CustomerAccount", "AccountNum"],
         "name": ["Name", "Customer Name", "displayName", "OrganizationName", "CustomerName"],
         "gstin": ["GST Registration No.", "GSTIN", "GST No.", "GST No", "gstRegistrationNo", "TaxRegistrationNumber"],
-        "state": ["State Code", "GST State Code", "State", "state", "AddressState"],
+        "state": ["State Code", "GST State Code", "State", "state", "AddressState", "County"],
         "address": ["Address", "addressLine1", "AddressStreet"], "city": ["City", "city", "AddressCity"],
         "pin": ["Post Code", "PIN Code", "PIN", "Pincode", "postalCode", "AddressZipCode"],
-        "phone": ["Phone No.", "Mobile Phone No.", "Phone", "phoneNumber"], "email": ["E-Mail", "Email", "email"],
+        "phone": ["Phone No.", "Mobile Phone No.", "Phone", "phoneNumber", "mobilePhoneNumber"], "email": ["E-Mail", "Email", "email"],
         "price_group": ["Customer Price Group", "Price Group", "customerPriceGroup", "PriceGroup"],
-        "terms": ["Payment Terms Code", "Payment Terms", "paymentTermsId"],
+        "terms": ["Payment Terms Code", "Payment Terms", "paymentTermsCode", "paymentTermsId"],
         "credit_limit": ["Credit Limit (LCY)", "Credit Limit", "creditLimit"],
         "balance": ["Balance (LCY)", "Balance", "balanceDue", "Balance Due (LCY)"], "blocked": ["Blocked", "blocked"]}},
     "materials": {"label": "Materials", "hint": r"^(?!.*(attrib|price)).*(item|material|product)", "fields": {
         "code": ["No.", "No", "Item No.", "Item Code", "Code", "number", "ItemNumber", "ProductNumber"],
         "name": ["Description", "Name", "Item Name", "displayName", "ProductName"],
-        "uom": ["Sales Unit of Measure", "Base Unit of Measure", "UOM", "Unit", "baseUnitOfMeasureCode", "SalesUnitSymbol"],
-        "hsn": ["HSN/SAC Code", "HSN Code", "HSN", "HSNCode", "hsnSacCode"],
+        "uom": ["Sales Unit of Measure", "Base Unit of Measure", "UOM", "Unit", "baseUnitOfMeasureCode", "SalesUnitSymbol", "Base Unit of Measure Code"],
+        "hsn": ["HSN/SAC Code", "HSN Code", "HSN", "HSNCode", "hsnSacCode", "HSN SAC Code"],
         "category": ["Item Category Code", "Category", "itemCategoryCode"], "price": ["Unit Price", "unitPrice", "Price"],
         "blocked": ["Blocked", "Sales Blocked", "blocked"]}},
     "attributes": {"label": "Material attributes", "hint": r"attrib", "fields": {
-        "material": ["Item No.", "No.", "Item", "ItemNumber", "Material"], "name": ["Attribute", "Attribute Name", "Name"],
-        "value": ["Value", "Attribute Value"]}},
+        "material": ["Item No.", "No.", "Item", "ItemNumber", "Material", "itemNumber"],
+        "name": ["Attribute", "Attribute Name", "Item Attribute Name", "Name", "attributeName"],
+        "value": ["Value", "Attribute Value", "Item Attribute Value", "attributeValue"]}},
     "prices": {"label": "Prices", "hint": r"price", "fields": {
-        "type": ["Sales Type", "Assign-to Type", "Price Type", "Type", "AccountCode"],
-        "code": ["Sales Code", "Assign-to No.", "Customer Price Group", "Customer No.", "AccountRelation", "Code"],
+        "type": ["Sales Type", "Source Type", "Assign-to Type", "Type", "AccountCode"],
+        "code": ["Sales Code", "Source No.", "Assign-to No.", "Customer Price Group", "Customer No.", "AccountRelation", "Code"],
         "material": ["Item No.", "Product No.", "Asset No.", "No.", "ItemNumber", "ItemRelation"],
         "uom": ["Unit of Measure Code", "Unit of Measure", "UOM", "UnitId"], "price": ["Unit Price", "Price", "Amount", "unitPrice"],
         "min_qty": ["Minimum Quantity", "Min. Quantity", "Min Qty", "QuantityAmountFrom"],
-        "from": ["Starting Date", "Valid From", "From Date", "FromDate"], "to": ["Ending Date", "Valid To", "To Date", "ToDate"]}},
+        "from": ["Starting Date", "Valid From", "From Date", "FromDate"], "to": ["Ending Date", "Valid To", "To Date", "ToDate"],
+        "status": ["Status", "Line Status"], "price_type": ["Price Type"]}},
     "hsn": {"label": "HSN codes", "hint": r"hsn|gst|sac", "fields": {
         "code": ["HSN/SAC Code", "Code", "HSN", "HSN Code"], "description": ["Description", "Name"],
-        "rate": ["GST %", "GST Rate", "GST Rate %", "Rate", "Tax %"], "cess": ["Cess %", "Cess"]}},
+        "rate": ["GST %", "GST Rate", "GST Rate %", "Rate", "Tax %"], "cess": ["Cess %", "Cess"],
+        "gst_group": ["GST Group Code", "GST Group"]}},
     "charges": {"label": "Charges", "hint": r"charge", "fields": {
         "code": ["Code", "Charge Code", "Charge No.", "No."], "name": ["Description", "Charge Name", "Name"],
         "calc": ["Calculation Type", "Calculation", "Calc Type", "Type"], "value": ["Value", "Rate %", "Rate", "Percentage", "Charge %", "Amount"],
@@ -151,26 +155,45 @@ def _yes(v) -> bool:
 
 
 def _date(v) -> date | None:
+    """Business Central sends 0001-01-01 for an empty date; that means no date."""
     if isinstance(v, datetime):
-        return v.date()
+        v = v.date()
     if isinstance(v, date):
-        return v
+        return v if v.year >= 1900 else None
     s = _s(v)
     m = re.match(r"^(\d{4})-(\d{1,2})-(\d{1,2})", s)
     if m:
-        return date(int(m[1]), int(m[2]), int(m[3]))
+        return date(int(m[1]), int(m[2]), int(m[3])) if int(m[1]) >= 1900 else None
     m = re.match(r"^(\d{1,2})[./-](\d{1,2})[./-](\d{4})$", s)
     if m:
         return date(int(m[3]), int(m[2]), int(m[1]))
     return None
 
 
+STATE_ABBR = {"JK": "01", "HP": "02", "PB": "03", "CH": "04", "UK": "05", "UT": "05", "HR": "06", "DL": "07", "RJ": "08", "UP": "09",
+              "BR": "10", "SK": "11", "AR": "12", "NL": "13", "MN": "14", "MZ": "15", "TR": "16", "ML": "17", "AS": "18", "WB": "19",
+              "JH": "20", "OD": "21", "OR": "21", "CG": "22", "CT": "22", "MP": "23", "GJ": "24", "DN": "26", "DD": "26", "MH": "27",
+              "KA": "29", "GA": "30", "LD": "31", "KL": "32", "TN": "33", "PY": "34", "AN": "35", "TS": "36", "TG": "36", "AP": "37", "LA": "38"}
+
+
 def _state(v, gstin: str) -> str:
     s = _s(v)
     if re.fullmatch(r"\d{1,2}", s):
         return s.zfill(2)
+    if s.upper() in STATE_ABBR:
+        return STATE_ABBR[s.upper()]
     hit = next((k for k, n in STATES.items() if n.lower() == s.lower()), "")
     return hit or (gstin[:2] if re.match(r"^\d{2}", gstin) else "")
+
+
+GST_RATES = (0, 0.1, 0.25, 1.5, 3, 5, 6, 7.5, 12, 18, 28, 40)
+
+
+def rate_from_group(v) -> float:
+    """Business Central keeps GST rates in its tax engine, not on the HSN code. GST group codes are usually named
+    after the rate (GST18, 18%, G-5), so the rate is read from the code when it is one of the GST slabs."""
+    m = re.search(r"\d+(?:\.\d+)?", _s(v))
+    return float(m[0]) if m and float(m[0]) in GST_RATES else 0.0
 
 
 def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool) -> dict:
@@ -250,6 +273,10 @@ def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool) -> d
         codes = set(db.scalars(select(Material.code)))
         fresh = []
         for i, r in enumerate(rows):
+            if m.get("price_type") and re.search(r"purchase", _s(get(r, "price_type")), re.I):
+                skip(i, "purchase price"); continue
+            if m.get("status") and _s(get(r, "status")) and not re.fullmatch(r"active", _s(get(r, "status")), re.I):
+                skip(i, f"price list line is {_s(get(r, 'status')).lower()}, not active"); continue
             mat, price = _s(get(r, "material")), _num(get(r, "price"))
             if mat not in codes or price <= 0:
                 skip(i, f"item {mat} is not in the materials" if mat not in codes else "no unit price"); continue
@@ -268,10 +295,15 @@ def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool) -> d
                 skip(i, f'"{code}" is not an HSN/SAC code'); continue
             h = db.get(HsnCode, code)
             res["updated" if h else "added"] += 1
+            rate = _num(get(r, "rate")) if m.get("rate") else rate_from_group(get(r, "gst_group"))
+            grp = _s(get(r, "gst_group"))
+            if not m.get("rate") and not rate and not re.search(r"exempt|nil|zero|^0+(\.0+)?%?$|non.?gst", grp, re.I) and len(res["errors"]) < 20:
+                res["errors"].append(f"Row {i + 2}: HSN {code} gets 0% GST: no GST rate column, and the rate cannot be read from GST group "
+                                     f"\"{grp or 'blank'}\". Choose the GST % column, or import HSN rates from a file.")
             if dry:
                 continue
             h = h or HsnCode(code=code)
-            h.description, h.rate, h.cess = _s(get(r, "description"))[:200], _num(get(r, "rate")), _num(get(r, "cess"))
+            h.description, h.rate, h.cess = _s(get(r, "description"))[:200], rate, _num(get(r, "cess"))
             db.add(h)
     elif ent == "charges":
         fresh = []
@@ -319,7 +351,9 @@ def api_url(s: dict, path: str) -> str:
     base = (s["dynamics"].get("base_url") or "").rstrip("/")
     if not base and not path.startswith("http"):
         raise HTTPException(422, "Enter the Dynamics API address under Dynamics connection.")
-    return path if path.startswith("http") else f"{base}/{path.lstrip('/')}"
+    if path.startswith("http"):
+        return path
+    return f"{base}/{path.lstrip('/')}" if path.strip("/") else base
 
 
 def api_call(s: dict, token: str, path: str, method="GET", body=None) -> dict:
@@ -335,16 +369,90 @@ def api_call(s: dict, token: str, path: str, method="GET", body=None) -> dict:
     return data
 
 
-def api_pull(s: dict, ent: str) -> list[dict]:
+# Business Central has two kinds of web address:
+#   API v2.0  .../v2.0/{tenant}/{env}/api/v2.0/companies({id})/customers      (the API address + "customers")
+#   OData V4  .../v2.0/{tenant}/{env}/ODataV4/Company('{name}')/{service}     (pages published under Web Services)
+# The standard API has no GSTIN, HSN codes or price lists, so those come from published pages: an endpoint written
+# "odata:ServiceName" (optionally with ?$filter=...) is turned into the OData V4 address of the same company.
+def _bc_root(s: dict) -> tuple[str, str]:
+    base = (s["dynamics"].get("base_url") or "").rstrip("/")
+    m = re.match(r"^(https?://.+?)/api/[^/]+/[^/]+/[^/]+/companies\(([^)]+)\)", base) or \
+        re.match(r"^(https?://.+?)/api/v2\.0/companies\(([^)]+)\)", base)
+    if not m:
+        raise HTTPException(422, "For odata: endpoints the API address must be the Business Central one, ending in /api/v2.0/companies(<company id>).")
+    return m[1], m[2]
+
+
+def odata_company_url(s: dict, token: str) -> str:
+    root, _ = _bc_root(s)
+    name = api_call(s, token, "").get("name")
+    if not name:
+        raise HTTPException(502, "Dynamics did not return the company name for the API address.")
+    return f"{root}/ODataV4/Company('{quote(name.replace(chr(39), chr(39) * 2), safe='')}')"
+
+
+def endpoint_url(s: dict, token: str, ep: str, cache: dict | None = None) -> str:
+    ep = (ep or "").strip()
+    if ep.lower().startswith("odata:"):
+        cache = cache if cache is not None else {}
+        if "company" not in cache:
+            cache["company"] = odata_company_url(s, token)
+        return f"{cache['company']}/{ep[6:].strip().lstrip('/')}"
+    return ep
+
+
+def odata_services(s: dict) -> list[dict]:
+    """Pages and queries published under Web Services in Business Central (OData V4)."""
+    root, _ = _bc_root(s)
+    token = access_token(s)
+    b = api_call(s, token, f"{root}/ODataV4/")
+    return sorted(({"name": x.get("name"), "kind": x.get("kind", "")} for x in b.get("value", []) if x.get("name")), key=lambda x: x["name"].lower())
+
+
+def api_pull(s: dict, ent: str, token: str | None = None, cache: dict | None = None) -> list[dict]:
     ep = s["dynamics"]["ep"].get(ent)
     if not ep:
-        raise HTTPException(422, f"No API endpoint is set for {ENT[ent]['label'].lower()}. Use a file, or set the endpoint.")
-    token, url, rows, pages = access_token(s), ep, [], 0
+        raise HTTPException(422, f"No API endpoint is set for {ENT[ent]['label'].lower()}. Set it under Dynamics connection.")
+    token = token or access_token(s)
+    url, rows, pages = endpoint_url(s, token, ep, cache), [], 0
     while url and pages < 500:
         b = api_call(s, token, url)
         rows += [{k: v for k, v in x.items() if not k.startswith("@") and (v is None or not isinstance(v, (dict, list)))} for x in b.get("value", [])]
         url, pages = b.get("@odata.nextLink"), pages + 1
     return rows
+
+
+REQUIRED = {"customers": ("code", "name"), "materials": ("code", "name"), "attributes": ("material", "name", "value"),
+            "prices": ("material", "price"), "hsn": ("code",), "charges": ("code", "name", "value")}
+PULL_ORDER = ("customers", "materials", "hsn", "attributes", "prices", "charges")
+
+
+def api_map(s: dict, ent: str, headers: list[str]) -> dict:
+    """The columns chosen the last time this master came from the API, where they still exist; the rest automatic."""
+    auto = auto_map(ent, headers)
+    saved = (s["dynamics"].get("api_map") or {}).get(ent) or {}
+    return {k: (saved[k] if k in saved and (saved[k] == "" or saved[k] in headers) else v) for k, v in auto.items()}
+
+
+def item_price_fallback(db: Session, rows: list[dict], m: dict) -> int:
+    """As in Business Central, an item's own Unit Price applies when no price list line is for all customers.
+    Run after prices are replaced, so the price list wins and the item price fills the gaps."""
+    if not m.get("price") or not m.get("code"):
+        return 0
+    have = set(db.scalars(select(Price.material_code).where(Price.type == "all")))
+    mats = {x.code: x for x in db.scalars(select(Material))}
+    n = 0
+    for r in rows:
+        code, price = _s(r.get(m["code"])), _num(r.get(m["price"]))
+        if code in mats and code not in have and price > 0:
+            db.add(Price(type="all", code="", material_code=code, uom=mats[code].uom, price=price, min_qty=0))
+            have.add(code)
+            n += 1
+    return n
+
+
+def missing_fields(ent: str, m: dict) -> list[str]:
+    return [k for k in REQUIRED[ent] if not m.get(k)]
 
 
 # ------------------------------------------------------------------ out

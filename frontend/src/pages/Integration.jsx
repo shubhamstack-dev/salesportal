@@ -4,14 +4,20 @@ import { useSession } from '../session'
 import { Modal, useLoad, useUi } from '../ui'
 
 const FLABEL = { code: 'Code / No.', name: 'Name', gstin: 'GSTIN', state: 'State', address: 'Address', city: 'City', pin: 'PIN', phone: 'Phone', email: 'E-mail', price_group: 'Price group',
-  terms: 'Payment terms', credit_limit: 'Credit limit', balance: 'Balance', blocked: 'Blocked', uom: 'Unit', hsn: 'HSN/SAC', category: 'Category', price: 'Unit price', material: 'Item no.',
+  terms: 'Payment terms', status: 'Status (only Active used)', price_type: 'Price type (purchase left out)', gst_group: 'GST group (rate read from it)', credit_limit: 'Credit limit', balance: 'Balance', blocked: 'Blocked', uom: 'Unit', hsn: 'HSN/SAC', category: 'Category', price: 'Unit price', material: 'Item no.',
   value: 'Value / rate', type: 'Applies to (type)', min_qty: 'Minimum quantity', from: 'Valid from', to: 'Valid to', description: 'Description', rate: 'GST %', cess: 'Cess %',
   calc: 'Calculation', sign: 'Charge or discount', stage: 'Before / after GST', auto: 'Apply to every order', active: 'Active / blocked' }
+
+const EPLABEL = { customers: 'Customers', materials: 'Materials', attributes: 'Material attributes', prices: 'Prices', hsn: 'HSN codes', charges: 'Charges',
+  quotes: 'Quotations (to Dynamics)', orders: 'Sales orders (to Dynamics)', payments: 'Payments (to Dynamics)', expenses: 'Expense claims (to Dynamics)' }
+const EPHINT = { customers: 'odata:Customer_Card', materials: 'odata:Item_Card', attributes: 'odata:…', prices: 'odata:PriceListLines', hsn: 'odata:HSN_SAC',
+  charges: 'odata:… or leave empty', quotes: 'salesQuotes', orders: 'salesOrders', payments: 'customerPaymentJournals(<id>)/customerPayments', expenses: 'leave empty' }
 
 export default function Integration() {
   const { toast, confirm } = useUi(); const { refreshCounts } = useSession()
   const [s, reload] = useLoad(() => api('/api/integration/summary'), [])
   const [imp, setImp] = useState(null)
+  const [all, setAll] = useState(null)
   const fileRef = useRef(null), ackRef = useRef(null), entRef = useRef('')
   const after = () => { reload(); refreshCounts() }
   const pickFile = (ent) => { entRef.current = ent; fileRef.current.click() }
@@ -20,6 +26,10 @@ export default function Integration() {
     try { setImp(await api(`/api/integration/import/${entRef.current}/file`, { method: 'POST', form })) } catch (e) { toast(e.message) }
   }
   const pull = async (ent) => { toast('Downloading from Dynamics…'); try { setImp(await api(`/api/integration/import/${ent}/api`, { method: 'POST' })) } catch (e) { toast(e.message) } }
+  const pullAll = async () => {
+    setAll({ busy: true })
+    try { const r = await api('/api/integration/pull-all', { method: 'POST' }); setAll(r); after() } catch (e) { setAll(null); toast(e.message) }
+  }
   const exportOut = async () => { try { await download('/api/integration/export', `To_Dynamics_${new Date().toISOString().slice(0, 10)}.xlsx`, { method: 'POST' }); toast('Exported. Import the Dynamics numbers back when they are posted.'); after() } catch (e) { toast(e.message) } }
   const push = async () => { if (!(await confirm('Send to Dynamics now?', 'Quotations, approved orders, payments and approved expense claims are posted to the Dynamics API.', 'Send'))) return
     try { const r = await api('/api/integration/push', { method: 'POST' }); toast(`${r.sent} sent${r.failed ? `, ${r.failed} failed (see each document)` : ''}`); after() } catch (e) { toast(e.message) } }
@@ -30,9 +40,10 @@ export default function Integration() {
   return (<>
     <div className="note">Masters come only from Dynamics. Transactions go back to Dynamics by <b>Excel file</b> (any Dynamics version) or the <b>API</b>. The API is called by the portal's server, so browser restrictions (CORS) do not apply.</div>
     <div className="grid g2">
-      <div className="card"><h2>1. From Dynamics: masters</h2><p className="sub">Download customers and materials before prices and attributes. Records are matched by their Dynamics number; prices and charges are replaced as a whole.</p>
+      <div className="card"><div className="hd"><div><h2>1. From Dynamics: masters</h2><p className="sub">Download customers and materials before prices and attributes. Records are matched by their Dynamics number; prices and charges are replaced as a whole.</p></div>
+        <button className="btn pri" disabled={!s.masters.some((m) => m.api)} onClick={pullAll}>Download all via API</button></div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{s.masters.map((m) => <div key={m.entity} className="sync"><div className="meta"><b>{m.label}</b><span className="fine">{m.count} in the portal · {m.last ? 'downloaded ' + dt(m.last) : 'not downloaded yet'}</span></div>
-          <button className="btn sm" onClick={() => pickFile(m.entity)}>Import file</button>{m.entity !== 'attributes' && <button className="btn sm" disabled={!m.api} title={m.api ? '' : 'No API endpoint set'} onClick={() => pull(m.entity)}>Download via API</button>}
+          <button className="btn sm" onClick={() => pickFile(m.entity)}>Import file</button><button className="btn sm" disabled={!m.api} title={m.api ? '' : 'Set its endpoint under Dynamics connection'} onClick={() => pull(m.entity)}>Download via API</button>
           <button className="btn ghost sm" onClick={() => download(`/api/integration/template/${m.entity}`, `Template_${m.entity}.xlsx`)}>Template</button></div>)}</div></div>
       <div className="card"><h2>2. To Dynamics: transactions</h2><p className="sub">Saved quotations (sales quotes), approved orders, payments (cash receipt journal) and approved expense claims (employee journal).</p>
         <div className="grid g2" style={{ marginBottom: 12 }}>{[['Quotations', o.quotes], ['Sales orders', o.orders], ['Payments', o.payments], ['Expense claims', o.expenses]].map(([l, x]) =>
@@ -50,7 +61,20 @@ export default function Integration() {
     <input ref={fileRef} type="file" id="impInput" accept=".xlsx,.csv" hidden onChange={(e) => { const f = e.target.files[0]; e.target.value = ''; if (f) upload(f) }} />
     <input ref={ackRef} type="file" id="ackInput" accept=".xlsx,.csv" hidden onChange={(e) => { const f = e.target.files[0]; e.target.value = ''; if (f) ack(f) }} />
     <ImportDialog imp={imp} setImp={setImp} onDone={after} />
+    <PullAllDialog all={all} onClose={() => setAll(null)} />
   </>)
+}
+
+function PullAllDialog({ all, onClose }) {
+  if (!all) return <Modal open={false} />
+  const tone = { ok: 'ok', warning: 'warn', error: 'bad', skipped: '' }
+  return <Modal open onClose={all.busy ? undefined : onClose} wide><div className="dlg"><h2>Download all masters from Dynamics</h2>
+    {all.busy ? <div className="loading">Downloading customers, materials, HSN codes, attributes, prices and charges…</div>
+      : <><div className="scroll"><table className="t"><thead><tr><th>Master</th><th>Result</th><th className="r">New</th><th className="r">Updated</th><th className="r">Skipped</th><th>Details</th></tr></thead><tbody>
+        {all.results.map((x) => <tr key={x.entity}><td><b>{x.label}</b></td><td><span className={`badge ${tone[x.status]}`}>{x.status}</span></td>
+          <td className="r">{x.added ?? ''}</td><td className="r">{x.updated ?? ''}</td><td className="r">{x.skipped ?? ''}</td>
+          <td className="fine">{x.message || ''}{x.item_prices ? `${x.item_prices} item prices added where no price list line is for all customers. ` : ''}{(x.errors || []).slice(0, 3).map((e) => <div key={e}>{e}</div>)}</td></tr>)}</tbody></table></div>
+        <div className="btns"><button className="btn pri" onClick={onClose}>Done</button></div></>}</div></Modal>
 }
 
 function ImportDialog({ imp, setImp, onDone }) {
@@ -72,6 +96,7 @@ function ImportDialog({ imp, setImp, onDone }) {
 function Connection() {
   const { toast } = useUi(); const { reloadMe } = useSession()
   const [s, reload] = useLoad(() => api('/api/settings'), [])
+  const [svc, setSvc] = useState(null)
   if (!s) return null
   const d = s.dynamics
   const save = async (e) => {
@@ -81,7 +106,8 @@ function Connection() {
     try { await api('/api/settings', { method: 'PUT', body: { dynamics: { product: f.product, base_url: f.base_url.trim(), tenant_id: f.tenant_id.trim(), client_id: f.client_id.trim(), client_secret: f.client_secret,
       token: f.token, scope: f.scope.trim(), payments_negative: !!f.payments_negative, ep } } }); toast('Connection saved'); reload(); reloadMe() } catch (e2) { toast(e2.message) }
   }
-  const test = async () => { await save(); try { const r = await api('/api/integration/test', { method: 'POST' }); toast(`Connected. Dynamics answered with ${r.rows} customer row.`) } catch (e) { toast(e.message) } }
+  const test = async () => { await save(); try { const r = await api('/api/integration/test', { method: 'POST' }); toast(`Connected to ${r.company || 'Dynamics'}. Customers answered with ${r.rows} row(s).`) } catch (e) { toast(e.message) } }
+  const find = async () => { try { const r = await api('/api/integration/services'); setSvc(r.services); toast(`${r.services.length} published pages found`) } catch (e) { toast(e.message) } }
   return <div className="card"><h2>Dynamics connection</h2><p className="sub">For the API route. The server gets its own token from Microsoft Entra ID with the app registration below, so nothing needs pasting.</p>
     <form className="form" id="dynForm" onSubmit={save}>
       <label className="field">Dynamics product<select className="inp" name="product" defaultValue={d.product}><option value="bc">Business Central (API v2.0)</option><option value="odata">Other OData endpoint</option></select></label>
@@ -91,8 +117,11 @@ function Connection() {
       <label className="field">Client secret<input className="inp" name="client_secret" type="password" defaultValue={d.client_secret} autoComplete="off" /></label>
       <label className="field">Scope<input className="inp" name="scope" defaultValue={d.scope} /></label>
       <label className="field wide">Or a pasted access token (expires; for testing only)<input className="inp" name="token" type="password" defaultValue={d.token} autoComplete="off" /></label>
-      {Object.entries(d.ep).map(([k, v]) => <label key={k} className="field">{k[0].toUpperCase() + k.slice(1)} endpoint<input className="inp" name={'ep_' + k} defaultValue={v} /></label>)}
+      {Object.entries(d.ep).map(([k, v]) => <label key={k} className="field">{EPLABEL[k] || k} endpoint<input className="inp" name={'ep_' + k} defaultValue={v} list="odataSvc" placeholder={EPHINT[k]} /></label>)}
+      <datalist id="odataSvc">{(svc || []).map((x) => <option key={x.name} value={'odata:' + x.name} />)}</datalist>
       <label className="chk wide"><input type="checkbox" name="payments_negative" defaultChecked={d.payments_negative} /> Send payment amounts as negative numbers (Business Central cash receipt journals)</label></form>
-    <div className="tools" style={{ marginTop: 12 }}><button className="btn pri" onClick={save}>Save connection</button><button className="btn" onClick={test}>Test connection</button></div>
-    <div className="note warn">The standard Business Central API has customers, items, sales quotes, sales orders and customer payments, but not price lists, charges, HSN codes, GSTIN or employee expenses: use files for those, or ask your Dynamics partner for custom API pages. Secrets are stored in the database; restrict database access.</div></div>
+    <div className="tools" style={{ marginTop: 12 }}><button className="btn pri" onClick={save}>Save connection</button><button className="btn" onClick={test}>Test connection</button><button className="btn" onClick={find}>Find published pages</button></div>
+    {svc && <p className="fine">Published in Business Central: {svc.length ? svc.map((x) => x.name).join(', ') : 'none'}. Click an endpoint box to pick one.</p>}
+    <div className="note"><b>Endpoints.</b> A plain name (<code>customers</code>, <code>items</code>, <code>salesOrders</code>) is the standard Business Central API. It has no GSTIN, state code, HSN codes or price lists, so for those publish the page in Business Central (<b>Web Services → New → Object Type Page</b>, tick <b>Published</b>) and enter <code>odata:</code> plus its Service Name, for example <code>odata:Customer_Card</code>, <code>odata:Item_Card</code>, <code>odata:HSN_SAC</code>, <code>odata:PriceListLines</code>. A filter can follow: <code>odata:PriceListLines?$filter=Price_Type eq 'Sale'</code>.</div>
+    <div className="note warn">Secrets are stored in the database; restrict database access.</div></div>
 }

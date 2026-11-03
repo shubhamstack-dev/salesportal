@@ -19,7 +19,8 @@ def _preview(db: Session, ent: str, key: str, si: int | None, mapping: dict | No
     sheets = data["sheets"]
     si = D.pick_sheet(ent, sheets) if si is None else max(0, min(si, len(sheets) - 1))
     sh = sheets[si]
-    m = mapping or D.auto_map(ent, sh["headers"])
+    from_api = data["source"].startswith("Dynamics API")
+    m = mapping or (D.api_map(get_settings(db), ent, sh["headers"]) if from_api else D.auto_map(ent, sh["headers"]))
     res = D.apply_rows(db, ent, sh["rows"], m, dry=True)
     db.rollback()
     return {"import_id": key, "entity": ent, "label": D.ENT[ent]["label"], "source": data["source"], "sheet": si,
@@ -49,7 +50,7 @@ def import_api(ent: str, db: Session = Depends(get_db), _=Depends(admin)):
     _ent(ent)
     rows = D.api_pull(get_settings(db), ent)
     if not rows:
-        raise HTTPException(422, "Dynamics returned no rows.")
+        raise HTTPException(422, f"Dynamics returned no rows for {D.ENT[ent]['label'].lower()}.")
     headers = list({k: 1 for r in rows for k in r}.keys())
     return _preview(db, ent, D.stash([{"name": "API", "headers": headers, "rows": rows}], f"Dynamics API: {get_settings(db)['dynamics']['ep'][ent]}"), None, None)
 
@@ -73,13 +74,73 @@ def apply(ent: str, body: MapIn, db: Session = Depends(get_db), me: User = Depen
     sheets = data["sheets"]
     si = D.pick_sheet(ent, sheets) if body.sheet is None else body.sheet
     sh = sheets[si]
-    res = D.apply_rows(db, ent, sh["rows"], body.map or D.auto_map(ent, sh["headers"]), dry=False)
+    from_api = data["source"].startswith("Dynamics API")
     s = get_settings(db)
-    put_settings(db, {"sync_info": {**s.get("sync_info", {}), ent: iso_utc(now_utc())}})
+    m = body.map or (D.api_map(s, ent, sh["headers"]) if from_api else D.auto_map(ent, sh["headers"]))
+    res = D.apply_rows(db, ent, sh["rows"], m, dry=False)
+    patch = {"sync_info": {**s.get("sync_info", {}), ent: iso_utc(now_utc())}}
+    if from_api:      # remember the columns, so "Download all" and the next download use them
+        patch["dynamics"] = {"api_map": {**(s["dynamics"].get("api_map") or {}), ent: m}}
+    put_settings(db, patch)
     log(db, "in", D.ENT[ent]["label"], res["added"] + res["updated"], "warning" if res["skipped"] else "ok",
         f"{data['source']}: {res['added']} new, {res['updated']} updated, {res['skipped']} skipped", me)
     db.commit()
     return res
+
+
+@router.post("/pull-all")
+def pull_all(db: Session = Depends(get_db), me: User = Depends(admin)):
+    """Downloads every master that has an API endpoint, in dependency order, with the remembered columns."""
+    s = get_settings(db)
+    token, cache, out, items = None, {}, [], None
+    for ent in D.PULL_ORDER:
+        label = D.ENT[ent]["label"]
+        if not s["dynamics"]["ep"].get(ent):
+            out.append({"entity": ent, "label": label, "status": "skipped", "message": "No API endpoint; use a file"})
+            continue
+        try:
+            token = token or D.access_token(s)
+            rows = D.api_pull(s, ent, token, cache)
+        except HTTPException as e:
+            out.append({"entity": ent, "label": label, "status": "error", "message": str(e.detail)})
+            log(db, "in", label, 0, "error", f"Dynamics API: {e.detail}", me)
+            db.commit()
+            continue
+        headers = list({k: 1 for r in rows for k in r}.keys())
+        m = D.api_map(s, ent, headers)
+        miss = D.missing_fields(ent, m)
+        if not rows or miss:
+            msg = "Dynamics returned no rows" if not rows else \
+                f"Columns not found ({', '.join(miss)}). Use Download via API once and choose them."
+            out.append({"entity": ent, "label": label, "status": "error", "message": msg})
+            continue
+        dry = D.apply_rows(db, ent, rows, m, dry=True)
+        db.rollback()
+        if ent in ("prices", "charges") and not dry["added"]:     # these replace everything; never wipe them with nothing
+            out.append({"entity": ent, "label": label, "status": "error", "message": f"No usable rows ({dry['skipped']} skipped); nothing replaced",
+                        "errors": dry["errors"][:5]})
+            continue
+        res = D.apply_rows(db, ent, rows, m, dry=False)
+        if ent == "materials":
+            items = (rows, m)
+        if ent == "prices" and items:
+            db.flush()
+            res["item_prices"] = D.item_price_fallback(db, *items)
+        s = get_settings(db)
+        put_settings(db, {"sync_info": {**s.get("sync_info", {}), ent: iso_utc(now_utc())}})
+        log(db, "in", label, res["added"] + res["updated"], "warning" if res["skipped"] else "ok",
+            f"Dynamics API: {res['added']} new, {res['updated']} updated, {res['skipped']} skipped", me)
+        db.commit()
+        s = get_settings(db)
+        out.append({"entity": ent, "label": label, "status": "warning" if res["skipped"] else "ok", "added": res["added"], "updated": res["updated"],
+                    "skipped": res["skipped"], "errors": res["errors"][:5], "item_prices": res.get("item_prices", 0)})
+    return {"results": out}
+
+
+@router.get("/services")
+def services(db: Session = Depends(get_db), _=Depends(admin)):
+    """What is published under Web Services in Business Central, to fill in odata: endpoints."""
+    return {"services": D.odata_services(get_settings(db))}
 
 
 @router.get("/template/{ent}")
@@ -164,10 +225,12 @@ def push(db: Session = Depends(get_db), me: User = Depends(admin)):
     q = D.out_queues(db)
     token = D.access_token(s)
     ok = bad = 0
+    cache = {}
     targets = [("quotes", ep.get("quotes")), ("orders", ep.get("orders")), ("payments", ep.get("payments")), ("expenses", ep.get("expenses"))]
     for kind, path in targets:
         if not path:
             continue
+        path = D.endpoint_url(s, token, path, cache)
         for x in q[kind]:
             try:
                 if kind in ("quotes", "orders"):
@@ -196,6 +259,8 @@ def push(db: Session = Depends(get_db), me: User = Depends(admin)):
 @router.post("/test")
 def test(db: Session = Depends(get_db), _=Depends(admin)):
     s = get_settings(db)
-    ep = s["dynamics"]["ep"].get("customers") or ""
-    b = D.api_call(s, D.access_token(s), ep + ("&" if "?" in ep else "?") + "$top=1")
-    return {"ok": True, "rows": len(b.get("value", []))}
+    token = D.access_token(s)
+    company = D.api_call(s, token, "")
+    ep = D.endpoint_url(s, token, s["dynamics"]["ep"].get("customers") or "customers")
+    b = D.api_call(s, token, ep + ("&" if "?" in ep else "?") + "$top=1")
+    return {"ok": True, "rows": len(b.get("value", [])), "company": company.get("name") or company.get("displayName") or ""}
