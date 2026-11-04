@@ -74,11 +74,39 @@ def fake_post(url, data=None, **kw):
     return _json(200, {"access_token": "tok-123"})
 
 
+BC_DOCS = []
+BC_DOWN = {"on": False}
+SALESPEOPLE = {"SP01"}
+
+
+def bc_create(kind, body):
+    """What Business Central checks when a quote or order is posted to salesQuotes / salesOrders."""
+    if BC_DOWN["on"]:
+        return _json(503, {"error": {"message": "Service unavailable"}})
+    if body.get("customerNumber") not in {c["No"] for c in CUSTOMERS}:
+        return _json(400, {"error": {"message": f"The Customer does not exist. Identification fields and values: No.='{body.get('customerNumber')}'"}})
+    sp = body.get("salesperson")
+    if sp and sp not in SALESPEOPLE:
+        return _json(400, {"error": {"message": f"The field Salesperson Code of table Sales Header contains a value ({sp}) that cannot be found in the related table (Salesperson/Purchaser)."}})
+    lines = body.get("salesQuoteLines" if kind == "quote" else "salesOrderLines") or []
+    items = {i["No"] for i in ITEMS}
+    for ln in lines:
+        if ln["lineType"] != "Item" or ln["lineObjectNumber"] not in items or ln["quantity"] <= 0:
+            return _json(400, {"error": {"message": f"Bad line {ln}"}})
+    no = ("SQ" if kind == "quote" else "SO") + str(1001 + len(BC_DOCS))
+    BC_DOCS.append({"kind": kind, "number": no, **body})
+    return _json(201, {"id": f"guid-{no}", "number": no, **body})
+
+
 def fake_request(method, url, json=None, headers=None, **kw):
     calls.append((method, url))
     if headers.get("Authorization") != "Bearer tok-123":
         return _json(401, {"error": {"message": "The credentials provided are incorrect"}})
     path, _, query = url.partition("?")
+    if method == "POST" and path == f"{BASE}/salesQuotes":
+        return bc_create("quote", json)
+    if method == "POST" and path == f"{BASE}/salesOrders":
+        return bc_create("order", json)
     if path == BASE:
         return _json(200, {"id": CID, "name": COMPANY, "displayName": "SAMURAI FOODS"})
     if path == f"{BASE}/customers":                      # standard API v2.0, used by Test connection
@@ -260,3 +288,75 @@ def test_blank_gst_group_can_be_given_a_rate(c, monkeypatch):
     connect(c)
     p = c.post("/api/integration/import/hsn/api").json()
     assert p["map"]["gst_group"] == "GST_Group_Code" and all(g["by_hsn"] for g in p["gst_groups"])
+
+
+
+def _doc(c, kind, cust="C0001", **extra):
+    cid = next(x["id"] for x in c.get("/api/customers").json() if x["code"] == cust)
+    from app.services.common import local_today
+    body = {"kind": kind, "customer_id": cid, "date": local_today().isoformat(), "lines": [{"material": "SF-001-500", "qty": 12}], **extra}
+    r = c.post("/api/docs", json=body)
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_quotes_and_orders_go_to_dynamics_automatically(c):
+    connect(c, customers="odata:Customer_Card")
+    c.post("/api/integration/pull-all")
+    c.put("/api/settings", json={"dynamics": {"auto_push": True, "ep": {"quotes": "salesQuotes", "orders": "salesOrders"}}})
+    BC_DOCS.clear()
+
+    q = _doc(c, "quote")
+    got = c.get(f"/api/docs/{q['id']}").json()
+    assert got["sync"]["status"] == "synced" and got["sync"]["no"] == "SQ1001", got
+    sent = BC_DOCS[0]
+    assert sent["customerNumber"] == "C0001" and sent["externalDocumentNumber"] == q["no"]
+    assert sent["salesQuoteLines"][0]["lineObjectNumber"] == "SF-001-500" and sent["salesQuoteLines"][0]["quantity"] == 12
+
+    o = _doc(c, "order", quote_id=q["id"])                 # an administrator's order is approved at once
+    got = c.get(f"/api/docs/{o['id']}").json()
+    assert got["status"] == "approved" and got["sync"]["status"] == "synced" and got["sync"]["no"] == "SO1002"
+    assert BC_DOCS[1]["salesOrderLines"][0]["unitPrice"] > 0
+    assert c.get("/api/counts").json().get("integration", 0) == 0          # nothing left waiting
+    log = c.get("/api/integration/summary").json()["log"]
+    assert any("Sent automatically" in x["message"] for x in log)
+
+
+def test_unknown_salesperson_is_left_out_not_lost(c):
+    with SessionLocal() as db:
+        from app.models import User
+        u = db.query(User).filter_by(username="admin").one()
+        u.emp_code = "EMP-77"                               # not a salesperson in Business Central
+        db.commit()
+    q = _doc(c, "quote")
+    got = c.get(f"/api/docs/{q['id']}").json()
+    assert got["sync"]["status"] == "synced" and "salesperson" not in BC_DOCS[-1]
+    with SessionLocal() as db:
+        from app.models import User
+        u = db.query(User).filter_by(username="admin").one()
+        u.emp_code = "SP01"
+        db.commit()
+    q = _doc(c, "quote")
+    assert BC_DOCS[-1]["salesperson"] == "SP01"
+
+
+def test_dynamics_down_keeps_document_waiting(c):
+    BC_DOWN["on"] = True
+    try:
+        q = _doc(c, "quote")
+    finally:
+        BC_DOWN["on"] = False
+    got = c.get(f"/api/docs/{q['id']}").json()
+    assert got["sync"]["status"] == "error" and "503" in (got["sync"]["error"] or "")
+    assert c.get("/api/counts").json()["integration"] == 1                 # still in the queue
+    r = c.post("/api/integration/push").json()                             # Send via API later
+    assert r["sent"] == 1 and c.get(f"/api/docs/{q['id']}").json()["sync"]["status"] == "synced"
+
+
+def test_automatic_sending_off_waits_for_send_via_api(c):
+    c.put("/api/settings", json={"dynamics": {"auto_push": False}})
+    n = len(BC_DOCS)
+    q = _doc(c, "quote")
+    assert c.get(f"/api/docs/{q['id']}").json()["sync"]["status"] == "pending" and len(BC_DOCS) == n
+    c.post("/api/integration/push")
+    assert c.get(f"/api/docs/{q['id']}").json()["sync"]["status"] == "synced"

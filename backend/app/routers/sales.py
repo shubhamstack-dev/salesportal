@@ -1,7 +1,7 @@
 """Quotations, sales orders and payments. Prices and taxes are always worked out here, never trusted from the device."""
 from datetime import date
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import Customer, Payment, PaymentAllocation, SalesDoc, SalesDocLine, User
 from ..security import current_user, may_use_customer, visible_user_ids
+from ..services.dynamics import auto_send
 from ..services.calc import build_lines, compute_totals, haversine_m, order_paid, outstanding
 from ..services.common import (STATES, add_days, f, get_or_404, get_settings, iso_utc, local_today, next_no, now_utc,
                                parse_date, r2)
@@ -158,17 +159,28 @@ def _save(db: Session, d: SalesDoc | None, body: DocIn, me: User) -> SalesDoc:
     return d
 
 
+def _queue_send(db: Session, d: SalesDoc, tasks: BackgroundTasks) -> None:
+    """With automatic sending on, a saved quotation or approved order goes to Dynamics right after the reply."""
+    dyn = get_settings(db)["dynamics"]
+    if d.sync_status == "pending" and dyn.get("auto_push") and dyn["ep"].get("quotes" if d.kind == "quote" else "orders"):
+        tasks.add_task(auto_send, d.id)
+
+
 @router.post("/docs")
-def create_doc(body: DocIn, db: Session = Depends(get_db), me: User = Depends(current_user)):
-    return doc_out(db, _save(db, None, body, me), True)
+def create_doc(body: DocIn, tasks: BackgroundTasks, db: Session = Depends(get_db), me: User = Depends(current_user)):
+    d = _save(db, None, body, me)
+    _queue_send(db, d, tasks)
+    return doc_out(db, d, True)
 
 
 @router.put("/docs/{doc_id}")
-def update_doc(doc_id: int, body: DocIn, db: Session = Depends(get_db), me: User = Depends(current_user)):
+def update_doc(doc_id: int, body: DocIn, tasks: BackgroundTasks, db: Session = Depends(get_db), me: User = Depends(current_user)):
     d = get_or_404(db, SalesDoc, doc_id, "document")
     if d.kind != body.kind or not _editable(db, d, me):
         raise HTTPException(409, "This document can no longer be changed.")
-    return doc_out(db, _save(db, d, body, me), True)
+    d = _save(db, d, body, me)
+    _queue_send(db, d, tasks)
+    return doc_out(db, d, True)
 
 
 @router.get("/docs")
@@ -201,7 +213,7 @@ def get_doc(doc_id: int, db: Session = Depends(get_db), me: User = Depends(curre
 
 
 @router.post("/docs/{doc_id}/approve")
-def approve(doc_id: int, db: Session = Depends(get_db), me: User = Depends(current_user)):
+def approve(doc_id: int, tasks: BackgroundTasks, db: Session = Depends(get_db), me: User = Depends(current_user)):
     d = get_or_404(db, SalesDoc, doc_id, "document")
     if me.role not in ("admin", "manager") or d.rep_id not in visible_user_ids(db, me):
         raise HTTPException(403, "Only a manager or administrator can approve orders.")
@@ -209,6 +221,7 @@ def approve(doc_id: int, db: Session = Depends(get_db), me: User = Depends(curre
         raise HTTPException(409, "Only orders waiting for approval can be approved.")
     d.status, d.approved_by, d.approved_at, d.sync_status = "approved", me.id, now_utc(), "pending"
     db.commit()
+    _queue_send(db, d, tasks)
     return doc_out(db, d, True)
 
 

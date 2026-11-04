@@ -246,8 +246,9 @@ def push(db: Session = Depends(get_db), me: User = Depends(admin)):
         for x in q[kind]:
             try:
                 if kind in ("quotes", "orders"):
-                    r = D.api_call(s, token, path, "POST", D.order_payload(db, x))
-                    no = r.get("number") or r.get("No") or r.get("id") or ""
+                    D.send_doc(db, s, token, x, path)
+                    ok += 1
+                    continue
                 elif kind == "payments":
                     c = db.get(Customer, x.customer_id)
                     r = D.api_call(s, token, path, "POST", {"customerNumber": c.code, "postingDate": x.pay_date.isoformat(), "documentNumber": x.no,

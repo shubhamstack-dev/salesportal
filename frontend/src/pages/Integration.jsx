@@ -112,7 +112,7 @@ function Connection() {
     const f = Object.fromEntries(new FormData(document.getElementById('dynForm')))
     const ep = Object.fromEntries(Object.keys(d.ep).map((k) => [k, (f['ep_' + k] || '').trim()]))
     try { await api('/api/settings', { method: 'PUT', body: { dynamics: { product: f.product, base_url: f.base_url.trim(), tenant_id: f.tenant_id.trim(), client_id: f.client_id.trim(), client_secret: f.client_secret,
-      token: f.token, scope: f.scope.trim(), payments_negative: !!f.payments_negative, ep } } }); toast('Connection saved'); reload(); reloadMe() } catch (e2) { toast(e2.message) }
+      token: f.token, scope: f.scope.trim(), payments_negative: !!f.payments_negative, auto_push: !!f.auto_push, ep } } }); toast('Connection saved'); reload(); reloadMe() } catch (e2) { toast(e2.message) }
   }
   const test = async () => { await save(); try { const r = await api('/api/integration/test', { method: 'POST' }); toast(`Connected to ${r.company || 'Dynamics'}. Customers answered with ${r.rows} row(s).`) } catch (e) { toast(e.message) } }
   const find = async () => { try { const r = await api('/api/integration/services'); setSvc(r.services); toast(`${r.services.length} published pages found`) } catch (e) { toast(e.message) } }
@@ -127,6 +127,7 @@ function Connection() {
       <label className="field wide">Or a pasted access token (expires; for testing only)<input className="inp" name="token" type="password" defaultValue={d.token} autoComplete="off" /></label>
       {Object.entries(d.ep).map(([k, v]) => <label key={k} className="field">{EPLABEL[k] || k} endpoint<input className="inp" name={'ep_' + k} defaultValue={v} list="odataSvc" placeholder={EPHINT[k]} /></label>)}
       <datalist id="odataSvc">{(svc || []).map((x) => <option key={x.name} value={'odata:' + x.name} />)}</datalist>
+      <label className="chk wide"><input type="checkbox" name="auto_push" defaultChecked={d.auto_push} /> <span><b>Send quotations and sales orders to Dynamics automatically</b> as soon as a quotation is saved or an order is approved, through the Quotations and Sales orders endpoints. If Dynamics cannot be reached, the document stays under "To Dynamics" with its error, for Send via API.</span></label>
       <label className="chk wide"><input type="checkbox" name="payments_negative" defaultChecked={d.payments_negative} /> Send payment amounts as negative numbers (Business Central cash receipt journals)</label></form>
     <div className="tools" style={{ marginTop: 12 }}><button className="btn pri" onClick={save}>Save connection</button><button className="btn" onClick={test}>Test connection</button><button className="btn" onClick={find}>Find published pages</button></div>
     {svc && <p className="fine">Published in Business Central: {svc.length ? svc.map((x) => x.name).join(', ') : 'none'}. Click an endpoint box to pick one.</p>}

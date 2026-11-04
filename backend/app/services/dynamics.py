@@ -566,3 +566,51 @@ def order_payload(db: Session, d: SalesDoc) -> dict:
     else:
         body.update(orderDate=d.doc_date.isoformat(), requestedDeliveryDate=d.delivery_date.isoformat() if d.delivery_date else None, salesOrderLines=lines)
     return {k: v for k, v in body.items() if v is not None}
+
+
+def send_doc(db: Session, s: dict, token: str, d: SalesDoc, path: str) -> None:
+    """Creates one quotation or sales order in Dynamics and records the result on the document.
+    If Dynamics does not know the employee code as a salesperson, the document is sent without one rather than lost."""
+    body = order_payload(db, d)
+    try:
+        try:
+            r = api_call(s, token, path, "POST", body)
+        except HTTPException as e:
+            if "salesperson" in str(e.detail).lower() and body.get("salesperson"):
+                body.pop("salesperson")
+                r = api_call(s, token, path, "POST", body)
+            else:
+                raise
+        no = r.get("number") or r.get("No") or r.get("id") or ""
+        d.sync_status, d.sync_no, d.sync_at, d.sync_error = "synced", str(no)[:40], now_utc(), None
+    except HTTPException as e:
+        d.sync_status, d.sync_error, d.sync_at = "error", str(e.detail)[:500], now_utc()
+        raise
+
+
+def auto_send(doc_id: int) -> None:
+    """Runs after a quotation is saved or an order approved, when automatic sending is on. Never raises:
+    a failure leaves the document as "Sync error", still in the Dynamics sync queue for Send via API."""
+    from ..db import SessionLocal
+    from ..models import SyncLog
+    with SessionLocal() as db:
+        d = db.get(SalesDoc, doc_id)
+        if not d or d.sync_status not in ("pending", "error"):
+            return
+        s = get_settings(db)
+        kind = "quotes" if d.kind == "quote" else "orders"
+        ep = s["dynamics"]["ep"].get(kind)
+        if not s["dynamics"].get("auto_push") or not ep:
+            return
+        label = "Quotation" if d.kind == "quote" else "Sales order"
+        try:
+            token = access_token(s)
+            send_doc(db, s, token, d, endpoint_url(s, token, ep))
+            db.add(SyncLog(direction="out", entity=label, count=1, status="ok", message=f"Sent automatically: {d.no} is {d.sync_no} in Dynamics"))
+        except HTTPException as e:
+            if d.sync_status != "error":
+                d.sync_status, d.sync_error, d.sync_at = "error", str(e.detail)[:500], now_utc()
+            db.add(SyncLog(direction="out", entity=label, count=0, status="error", message=f"Automatic send of {d.no} failed: {e.detail}"))
+        except Exception as e:      # network or anything unexpected: keep it in the queue
+            d.sync_status, d.sync_error, d.sync_at = "error", f"Automatic send failed: {e}"[:500], now_utc()
+        db.commit()
