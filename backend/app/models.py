@@ -122,6 +122,8 @@ class Material(Base):
     hsn: Mapped[str] = mapped_column(String(8), default="")
     blocked: Mapped[bool] = mapped_column(Boolean, default=False)
     synced_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    mrp: Mapped[Decimal | None] = mapped_column(Money, nullable=True, default=0)              # printed MRP per unit
+    pack_qty: Mapped[Decimal | None] = mapped_column(Numeric(12, 4), nullable=True, default=0)   # units per packet, for Pkts.
     attributes: Mapped[list["MaterialAttribute"]] = relationship(cascade="all, delete-orphan", lazy="selectin",
                                                                  order_by="MaterialAttribute.id")
 

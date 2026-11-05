@@ -7,9 +7,9 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import Customer, Payment, PaymentAllocation, SalesDoc, SalesDocLine, User
+from ..models import Customer, Material, Payment, PaymentAllocation, SalesDoc, SalesDocLine, User
 from ..security import current_user, may_use_customer, visible_user_ids
-from ..services.dynamics import auto_send
+from ..services.dynamics import STATE_ABBR, auto_send
 from ..services.calc import build_lines, compute_totals, haversine_m, order_paid, outstanding
 from ..services.common import (STATES, add_days, f, get_or_404, get_settings, iso_utc, local_today, next_no, now_utc,
                                parse_date, r2)
@@ -75,6 +75,12 @@ def preview(body: DocIn, db: Session = Depends(get_db), me: User = Depends(curre
                          "price_group": c.price_group, "intra": totals["intra"]}}
 
 
+def _print_extra(db: Session, code: str) -> dict:
+    """MRP and pack size of the material, for the Pkts. and MRP columns of the printed document."""
+    m = db.scalar(select(Material).where(Material.code == code))
+    return {"mrp": f(m.mrp) if m and m.mrp else 0, "pack_qty": f(m.pack_qty) if m and m.pack_qty else 0}
+
+
 def doc_out(db: Session, d: SalesDoc, full=False) -> dict:
     c = db.get(Customer, d.customer_id)
     rep = db.get(User, d.rep_id)
@@ -91,11 +97,14 @@ def doc_out(db: Session, d: SalesDoc, full=False) -> dict:
                    charges=d.chosen_charges, totals=d.totals, raw_status=d.status, quote_no=q.no if q else None, quote_id=d.quote_id,
                    order_no=conv.no if conv else None, loc={"lat": f(d.lat), "lng": f(d.lng)} if d.lat is not None else None,
                    distance_m=dist, created_at=iso_utc(d.created_at), paid=order_paid(db, d.id) if d.kind == "order" else None,
-                   customer_detail={"code": c.code, "name": c.name, "gstin": c.gstin, "state": STATES.get(c.state, ""),
-                                    "address": ", ".join(x for x in [c.address, c.city, c.pin] if x)},
+                   customer_detail={"code": c.code, "name": c.name, "gstin": c.gstin, "state": STATES.get(c.state, ""), "state_code": c.state,
+                                    "address": ", ".join(x for x in [c.address, c.city, c.pin] if x), "street": c.address, "city": c.city,
+                                    "pin": c.pin, "phone": c.phone, "email": c.email, "terms": c.terms,
+                                    "state_abbr": next((k for k, v in STATE_ABBR.items() if v == c.state), c.state)},
+                   rep_code=rep.emp_code if rep else "", delivery_text=d.delivery_date.isoformat() if d.delivery_date else None,
                    lines=[{"material": l.material_code, "name": l.name, "uom": l.uom, "hsn": l.hsn, "qty": f(l.qty), "price": f(l.price),
-                           "disc": f(l.disc), "gst_rate": f(l.gst_rate), "taxable": f(l.taxable), "gst": f(l.gst), "price_source": l.price_source}
-                          for l in d.lines])
+                           "disc": f(l.disc), "gst_rate": f(l.gst_rate), "taxable": f(l.taxable), "gst": f(l.gst), "price_source": l.price_source,
+                           **_print_extra(db, l.material_code)} for l in d.lines])
     return out
 
 

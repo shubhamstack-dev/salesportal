@@ -360,3 +360,38 @@ def test_automatic_sending_off_waits_for_send_via_api(c):
     assert c.get(f"/api/docs/{q['id']}").json()["sync"]["status"] == "pending" and len(BC_DOCS) == n
     c.post("/api/integration/push")
     assert c.get(f"/api/docs/{q['id']}").json()["sync"]["status"] == "synced"
+
+
+COMPANY_PAGE = [{"Name": "SAMURAI FOODS", "Address": "SHOP NO K 28 KISAN BAZAAR", "Address_2": "GOMTI NAGAR", "City": "LUCKNOW",
+                 "Post_Code": "226010", "Country_Region_Code": "IN", "Phone_No": "", "E_Mail": "", "GST_Registration_No": "09AFUFS4116C1ZT",
+                 "P_A_N_No": "AFUFS4116C", "SF_FSSAI_No": "12725066002389", "Bank_Name": "Bandhan Bank", "Bank_Branch_No": "Lalbagh, Lucknow",
+                 "Bank_Account_No": "20100076657855", "IBAN": "BDBL0001582", "SF_UPI_Id": "3285679a@bandhan"}]
+
+
+def test_company_details_from_dynamics(c, monkeypatch):
+    monkeypatch.setitem(PAGES, "Company_Information", COMPANY_PAGE)
+    connect(c, company="odata:Company_Information")
+    r = c.post("/api/integration/company")
+    assert r.status_code == 200, r.text
+    s = c.get("/api/settings").json()
+    co, pr = s["company"], s["print"]
+    assert co["legal_name"] == "SAMURAI FOODS" and co["gstin"] == "09AFUFS4116C1ZT" and co["pan"] == "AFUFS4116C" and co["fssai"] == "12725066002389"
+    assert co["address"] == "SHOP NO K 28 KISAN BAZAAR\nGOMTI NAGAR\nLUCKNOW, 226010\nIndia" and co["state"] == "09"
+    assert (pr["bank_name"], pr["account_no"], pr["branch"], pr["ifsc"], pr["upi_id"]) == ("Bandhan Bank", "20100076657855", "Lalbagh, Lucknow", "BDBL0001582", "3285679a@bandhan")
+
+
+def test_customer_address_lines_and_item_mrp_pack(c, monkeypatch):
+    cust = [{**CUSTOMERS[0], "Name": "Mr.Durgesh K Gupta", "Name_2": "D.S Associates", "Address": "Ward No.-41,", "Address_2": "Rahmatnagar, Mirzapur",
+             "City": "Gorakhpur", "Post_Code": "273005"}]
+    items = [{**ITEMS[0], "No": "SF-001-1000.", "Unit_Price": 660}, {**ITEMS[1], "No": "SF-013-1000", "Unit_Price": 690, "Net_Weight": 0}]
+    monkeypatch.setitem(PAGES, "Customer_Card", cust)
+    monkeypatch.setitem(PAGES, "Item_Card", items)
+    connect(c)
+    for ent in ("customers", "materials"):
+        p = c.post(f"/api/integration/import/{ent}/api").json()
+        c.post(f"/api/integration/import/{ent}/apply", json={"import_id": p["import_id"], "map": p["map"]})
+    with SessionLocal() as db:
+        cu = db.query(Customer).filter_by(code="C0001").one()
+        assert cu.address == "D.S Associates\nWard No.-41,\nRahmatnagar, Mirzapur" and cu.city == "Gorakhpur"
+        m = db.query(Material).filter_by(code="SF-001-1000.").one()
+        assert float(m.mrp) == 660 and float(m.pack_qty) == 1.0

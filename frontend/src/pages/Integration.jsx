@@ -8,9 +8,9 @@ const FLABEL = { code: 'Code / No.', name: 'Name', gstin: 'GSTIN', state: 'State
   value: 'Value / rate', type: 'Applies to (type)', min_qty: 'Minimum quantity', from: 'Valid from', to: 'Valid to', description: 'Description', rate: 'GST %', cess: 'Cess %',
   calc: 'Calculation', sign: 'Charge or discount', stage: 'Before / after GST', auto: 'Apply to every order', active: 'Active / blocked' }
 
-const EPLABEL = { customers: 'Customers', materials: 'Materials', attributes: 'Material attributes', prices: 'Prices', hsn: 'HSN codes', charges: 'Charges',
+const EPLABEL = { company: 'Company details (for printing)', customers: 'Customers', materials: 'Materials', attributes: 'Material attributes', prices: 'Prices', hsn: 'HSN codes', charges: 'Charges',
   quotes: 'Quotations (to Dynamics)', orders: 'Sales orders (to Dynamics)', payments: 'Payments (to Dynamics)', expenses: 'Expense claims (to Dynamics)' }
-const EPHINT = { customers: 'odata:Customer_Card', materials: 'odata:Item_Card', attributes: 'odata:…', prices: 'odata:PriceListLines', hsn: 'odata:HSN_SAC',
+const EPHINT = { company: 'companyInformation or odata:Company_Information', customers: 'odata:Customer_Card', materials: 'odata:Item_Card', attributes: 'odata:…', prices: 'odata:PriceListLines', hsn: 'odata:HSN_SAC',
   charges: 'odata:… or leave empty', quotes: 'salesQuotes', orders: 'salesOrders', payments: 'customerPaymentJournals(<id>)/customerPayments', expenses: 'leave empty' }
 
 export default function Integration() {

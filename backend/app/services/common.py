@@ -14,7 +14,20 @@ from ..models import AppSetting, DocSequence, SyncLog, User
 TZ = ZoneInfo(APP_TZ)
 
 DEFAULT_SETTINGS = {
-    "company": {"name": "Samurai Foods", "gstin": "", "state": "09", "address": ""},
+    "company": {"name": "Samurai Foods", "gstin": "", "state": "09", "address": "", "legal_name": "", "phone": "", "email": "",
+                "pan": "", "fssai": ""},
+    # Printed quotations and sales orders (layout of the Samurai Foods Word templates)
+    "print": {"bank_name": "", "account_name": "", "account_no": "", "branch": "", "ifsc": "", "upi_id": "",
+              "jurisdiction": "Lucknow, Uttar Pradesh",
+              "terms": "Payment Terms: Payment shall be made as per the mutually agreed credit/payment terms mentioned in the invoice or purchase order.\n"
+                       "Product Quality: All products are supplied in accordance with the agreed specifications, quality standards and applicable food safety requirements.\n"
+                       "Delivery & Acceptance: Goods shall be considered accepted upon delivery unless any shortage, damage or quality discrepancy is reported promptly.\n"
+                       "Storage & Handling: The buyer shall ensure proper storage and handling of food products after delivery, as per the applicable product requirements.\n"
+                       "Taxes & Charges: GST and other applicable statutory taxes/charges shall be levied as per the prevailing government regulations.\n"
+                       "Cheque Bounce Charges: In case of dishonour or bounce of any cheque issued against the invoice, a penalty of Rs. 2,000/- shall be charged towards cheque bounce and processing charges.\n"
+                       "Dispute & Jurisdiction: Any dispute arising in relation to the invoice shall be subject to the jurisdiction of {jurisdiction}.",
+              "quote_declaration": "This quotation is an offer of prices only and is not a tax invoice. Stock is subject to availability at the time of order confirmation.",
+              "order_declaration": "This sales order confirms the goods, quantities and prices agreed. It is not a tax invoice; the tax invoice is issued at dispatch."},
     "prefixes": {"order": "SO", "quote": "QT", "payment": "RC", "expense": "EX"},
     "quote_days": 15, "need_approval": True, "credit_check": "warn", "price_override": False, "round_off": True,
     "shift_start": "09:30", "grace_min": 15, "full_day_hrs": 8, "half_day_hrs": 4, "punch_needs_location": True,
@@ -22,7 +35,7 @@ DEFAULT_SETTINGS = {
     "dynamics": {"product": "bc", "base_url": "", "token": "", "tenant_id": "", "client_id": "", "client_secret": "",
                  "scope": "https://api.businesscentral.dynamics.com/.default", "payments_negative": True,
                  "api_map": {}, "gst_rates": {}, "auto_push": False,
-                 "ep": {"customers": "customers", "materials": "items", "attributes": "", "prices": "", "hsn": "", "charges": "",
+                 "ep": {"company": "companyInformation", "customers": "customers", "materials": "items", "attributes": "", "prices": "", "hsn": "", "charges": "",
                         "quotes": "salesQuotes", "orders": "salesOrders", "payments": "", "expenses": ""}},
 }
 SECRET_KEYS = ("token", "client_secret")

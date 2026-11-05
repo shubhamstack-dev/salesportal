@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { go } from '../App'
+import { printSalesDoc } from '../printdoc'
 import { addDays, api, dmy, download, esc, getPosition, inr, inr0, num, printDoc, SYNC, todayISO } from '../lib'
 import { LocLink } from '../maps'
 import { useSession } from '../session'
@@ -52,17 +53,7 @@ function DocView({ id, onClose }) {
   const [d, reload] = useLoad(() => (id ? api(`/api/docs/${id}`) : Promise.resolve(null)), [id])
   if (!id) return <Modal open={false} />
   const act = async (path, msg) => { try { await api(`/api/docs/${id}/${path}`, { method: 'POST' }); toast(msg); onClose(); go(window.location.hash) } catch (e) { toast(e.message) } }
-  const print = () => {
-    const co = settings.company, c = d.customer_detail, t = d.totals
-    printDoc(`${d.kind === 'quote' ? 'Quotation' : 'Sales order'} ${d.no}`, `<div style="display:flex;justify-content:space-between"><div><h1 style="margin:0">${esc(co.name)}</h1><div>${esc(co.address)}</div><div>GSTIN ${esc(co.gstin || '—')}</div></div>
-      <div style="text-align:right"><h2 style="margin:0">${d.kind === 'quote' ? 'Quotation' : 'Sales order'}</h2><b>${esc(d.no)}</b><div>${dmy(d.date)}</div>${d.valid_to ? `<div>Valid until ${dmy(d.valid_to)}</div>` : ''}</div></div><hr>
-      <b>${esc(c.name)}</b> (${esc(c.code)})<br>${esc(c.address)}<br>GSTIN ${esc(c.gstin || '—')} · Place of supply ${esc(c.state)}<br><br>
-      <table><tr><th>Material</th><th>HSN</th><th class="r">Qty</th><th class="r">Price</th><th class="r">Disc %</th><th class="r">Taxable</th><th class="r">GST</th></tr>
-      ${d.lines.map((l) => `<tr><td>${esc(l.material)} ${esc(l.name)}</td><td>${esc(l.hsn)}</td><td class="r">${num(l.qty)} ${esc(l.uom)}</td><td class="r">${inr(l.price)}</td><td class="r">${l.disc || ''}</td><td class="r">${inr(l.taxable)}</td><td class="r">${l.gst_rate}%</td></tr>`).join('')}</table>
-      <table style="max-width:380px;margin-left:auto"><tr><td>Taxable value</td><td class="r">${inr(t.taxable)}</td></tr>${t.intra ? `<tr><td>CGST</td><td class="r">${inr(t.cgst)}</td></tr><tr><td>SGST</td><td class="r">${inr(t.sgst)}</td></tr>` : `<tr><td>IGST</td><td class="r">${inr(t.igst)}</td></tr>`}
-      ${[...t.pre, ...t.post].map((x) => `<tr><td>${esc(x.name)}</td><td class="r">${inr(x.amount)}</td></tr>`).join('')}<tr><td><b>Total</b></td><td class="r"><b>${inr(t.total)}</b></td></tr></table>
-      <p>${d.remarks ? 'Remarks: ' + esc(d.remarks) : ''}</p><p>${esc(d.rep)}</p>`) || toast('Allow pop-ups to print.')
-  }
+  const print = async () => { if (!(await printSalesDoc(d, settings))) toast('Allow pop-ups to print.') }
   return <Modal open onClose={onClose} wide>{!d ? <div className="loading">Loading…</div> : <div className="dlg">
     <div className="hd" style={{ margin: 0 }}><div><h2>{d.kind === 'quote' ? 'Quotation' : 'Order'} {d.no} · {d.customer}</h2>
       <p className="fine" style={{ margin: 0 }}>{dmy(d.date)} · {d.rep}{d.po_ref && ` · ref ${d.po_ref}`}{d.valid_to && ` · valid until ${dmy(d.valid_to)}`}{d.delivery && ` · deliver by ${dmy(d.delivery)}`}</p></div>

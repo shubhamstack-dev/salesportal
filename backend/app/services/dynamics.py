@@ -32,7 +32,8 @@ ENT = {
         "name": ["Name", "Customer Name", "displayName", "OrganizationName", "CustomerName"],
         "gstin": ["GST Registration No.", "GSTIN", "GST No.", "GST No", "gstRegistrationNo", "TaxRegistrationNumber"],
         "state": ["State Code", "GST State Code", "State", "state", "AddressState", "County"],
-        "address": ["Address", "addressLine1", "AddressStreet"], "city": ["City", "city", "AddressCity"],
+        "name2": ["Name 2", "name2"], "address": ["Address", "addressLine1", "AddressStreet"],
+        "address2": ["Address 2", "addressLine2"], "city": ["City", "city", "AddressCity"],
         "pin": ["Post Code", "PIN Code", "PIN", "Pincode", "postalCode", "AddressZipCode"],
         "phone": ["Phone No.", "Mobile Phone No.", "Phone", "phoneNumber", "mobilePhoneNumber"], "email": ["E-Mail", "Email", "email"],
         "price_group": ["Customer Price Group", "Price Group", "customerPriceGroup", "PriceGroup"],
@@ -45,6 +46,8 @@ ENT = {
         "uom": ["Sales Unit of Measure", "Base Unit of Measure", "UOM", "Unit", "baseUnitOfMeasureCode", "SalesUnitSymbol", "Base Unit of Measure Code"],
         "hsn": ["HSN/SAC Code", "HSN Code", "HSN", "HSNCode", "hsnSacCode", "HSN SAC Code"],
         "category": ["Item Category Code", "Category", "itemCategoryCode"], "price": ["Unit Price", "unitPrice", "Price"],
+        "mrp": ["MRP", "MRP Price", "Maximum Retail Price", "MRP/Kg"],
+        "pack": ["Pack Size", "Net Weight", "netWeight", "Qty per Pack", "Pack Qty"],
         "blocked": ["Blocked", "Sales Blocked", "blocked"]}},
     "attributes": {"label": "Material attributes", "hint": r"attrib", "fields": {
         "material": ["Item No.", "No.", "Item", "ItemNumber", "Material", "itemNumber"],
@@ -229,6 +232,19 @@ def gst_groups(rows: list[dict], m: dict, gst_rates: dict | None) -> list[dict]:
             for k, n in sorted(seen.items())]
 
 
+def pack_qty(given: float, code: str, uom: str) -> float:
+    """Units in one packet, used to print Pkts. From Dynamics when it has a pack size or net weight; otherwise read from
+    an item number ending in the pack weight in grams (SF-001-500 = 0.5 kg, SF-010-1000 = 1 kg) when sold by the kg."""
+    if given > 0:
+        return given
+    m = re.search(r"-(\d{2,5})\.?$", code or "")
+    if m and (uom or "").upper() in ("KG", "KGS", "KILOGRAM"):
+        g = int(m[1])
+        if 50 <= g <= 50000:
+            return g / 1000
+    return 0.0
+
+
 def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_rates: dict | None = None) -> dict:
     """Upserts the rows (or only counts them when dry). Returns added, updated, skipped and first errors."""
     get = lambda r, k: r.get(m.get(k)) if m.get(k) else None  # noqa: E731
@@ -252,7 +268,8 @@ def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_
                 continue
             c = c or Customer(code=code)
             c.name, c.gstin, c.state = name[:160], gstin, _state(get(r, "state"), gstin)
-            c.address, c.city, c.pin = _s(get(r, "address"))[:250], _s(get(r, "city"))[:80], _s(get(r, "pin"))[:10]
+            addr = "\n".join(x for x in (_s(get(r, "name2")), _s(get(r, "address")), _s(get(r, "address2"))) if x)
+            c.address, c.city, c.pin = addr[:250], _s(get(r, "city"))[:80], _s(get(r, "pin"))[:10]
             c.phone, c.email, c.price_group, c.terms = _s(get(r, "phone"))[:40], _s(get(r, "email"))[:120], _s(get(r, "price_group"))[:40], _s(get(r, "terms"))[:40]
             c.credit_limit, c.balance, c.balance_at, c.synced_at = _num(get(r, "credit_limit")), _num(get(r, "balance")), now, now
             c.blocked = _yes(get(r, "blocked")) if m.get("blocked") else False
@@ -271,6 +288,9 @@ def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_
             mat.hsn = re.sub(r"\.0+$", "", _s(get(r, "hsn")))[:8]
             mat.blocked = _yes(get(r, "blocked")) if m.get("blocked") else False
             mat.synced_at = now
+            # MRP: its own column when Dynamics has one, else the item's Unit Price (the list price before customer prices)
+            mat.mrp = _num(get(r, "mrp")) if m.get("mrp") else _num(get(r, "price"))
+            mat.pack_qty = pack_qty(_num(get(r, "pack")) if m.get("pack") else 0, code, mat.uom)
             db.add(mat)
             db.flush()
             cat = _s(get(r, "category"))
@@ -614,3 +634,40 @@ def auto_send(doc_id: int) -> None:
         except Exception as e:      # network or anything unexpected: keep it in the queue
             d.sync_status, d.sync_error, d.sync_at = "error", f"Automatic send failed: {e}"[:500], now_utc()
         db.commit()
+
+
+
+# ------------------------------------------------------------------ company details for printing
+COMPANY_FIELDS = {        # first match wins; names normalised (lower case, letters and digits only)
+    "name": ["name", "displayname"], "addr1": ["address", "addressline1"], "addr2": ["address2", "addressline2"],
+    "city": ["city"], "pin": ["postcode", "postalcode"], "country": ["countryregioncode", "country", "countrycode"],
+    "phone": ["phoneno", "phonenumber"], "email": ["email"], "gstin": ["gstregistrationno", "gstin", "taxregistrationnumber", "taxregistrationno"],
+    "pan": ["panno", "pan", "pano", "pandetails"], "bank_name": ["bankname"], "branch": ["bankbranchno", "bankbranch"],
+    "account_no": ["bankaccountno", "bankaccountnumber"], "ifsc": ["ifsccode", "ifsc", "iban"],
+}
+COUNTRIES = {"IN": "India", "IND": "India"}
+
+
+def company_from_dynamics(s: dict) -> dict:
+    """Company Information from Business Central: the standard API (companyInformation) gives the name, address,
+    phone and e-mail; the Company Information page published as a web service also gives GSTIN, PAN, bank details
+    and any FSSAI or UPI fields added to it."""
+    ep = s["dynamics"]["ep"].get("company") or "companyInformation"
+    token = access_token(s)
+    b = api_call(s, token, endpoint_url(s, token, ep))
+    row = (b.get("value") or [b])[0] if isinstance(b, dict) else {}
+    norm = {re.sub(r"[^a-z0-9]", "", k.lower()): v for k, v in row.items() if not k.startswith("@") and not isinstance(v, (dict, list))}
+    pick = lambda f: next((_s(norm[k]) for k in COMPANY_FIELDS[f] if _s(norm.get(k))), "")
+    find = lambda word: next((_s(v) for k, v in norm.items() if word in k and _s(v)), "")
+    gstin = pick("gstin").upper()
+    if not re.fullmatch(r"\d{2}[A-Z]{5}\d{4}[A-Z][0-9A-Z]Z[0-9A-Z]", gstin):
+        gstin = ""
+    country = pick("country")
+    lines = [pick("addr1"), pick("addr2"), ", ".join(x for x in (pick("city"), pick("pin")) if x), COUNTRIES.get(country.upper(), country)]
+    company = {"legal_name": pick("name"), "address": "\n".join(x for x in lines if x), "phone": pick("phone"), "email": pick("email"),
+               "gstin": gstin, "pan": pick("pan").upper(), "fssai": find("fssai")}
+    if gstin:
+        company["state"] = gstin[:2]
+    bank = {"bank_name": pick("bank_name"), "branch": pick("branch"), "account_no": pick("account_no"), "ifsc": pick("ifsc").upper(),
+            "upi_id": find("upi")}
+    return {"company": {k: v for k, v in company.items() if v}, "print": {k: v for k, v in bank.items() if v}, "fields": len(norm)}

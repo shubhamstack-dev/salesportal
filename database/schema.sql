@@ -103,6 +103,8 @@ CREATE TABLE IF NOT EXISTS `materials` (
   `hsn` varchar(8) COLLATE utf8mb4_unicode_ci NOT NULL,
   `blocked` tinyint(1) NOT NULL,
   `synced_at` datetime NOT NULL,
+  `mrp` DECIMAL(15,2) NULL DEFAULT 0,
+  `pack_qty` DECIMAL(12,4) NULL DEFAULT 0,
   PRIMARY KEY (`id`),
   UNIQUE KEY `ix_materials_code` (`code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci

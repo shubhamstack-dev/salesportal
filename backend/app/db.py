@@ -1,7 +1,7 @@
 """Database engine, session factory and settings."""
 import os
 
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
 DATABASE_URL = os.getenv(
@@ -32,3 +32,23 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def add_missing_columns() -> list[str]:
+    """create_all makes new tables but never changes existing ones, so columns added in a later version
+    are added here: nullable, no data touched. Returns what was added."""
+    added = []
+    insp = inspect(engine)
+    tables = set(insp.get_table_names())
+    with engine.begin() as con:
+        for t in Base.metadata.sorted_tables:
+            if t.name not in tables:
+                continue
+            have = {c["name"] for c in insp.get_columns(t.name)}
+            for col in t.columns:
+                if col.name in have:
+                    continue
+                typ = col.type.compile(dialect=engine.dialect)
+                con.execute(text(f"ALTER TABLE {t.name} ADD COLUMN {col.name} {typ} NULL"))
+                added.append(f"{t.name}.{col.name}")
+    return added

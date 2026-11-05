@@ -149,6 +149,18 @@ def pull_all(db: Session = Depends(get_db), me: User = Depends(admin)):
     return {"results": out}
 
 
+@router.post("/company")
+def company(db: Session = Depends(get_db), me: User = Depends(admin)):
+    """Fills the printed company and bank details from Business Central's Company Information. Empty fields keep their value."""
+    got = D.company_from_dynamics(get_settings(db))
+    if not got["company"] and not got["print"]:
+        raise HTTPException(422, "Dynamics returned no company details.")
+    put_settings(db, {"company": got["company"], "print": got["print"]})
+    log(db, "in", "Company details", 1, "ok", f"Dynamics: {', '.join(list(got['company']) + list(got['print']))}", me)
+    db.commit()
+    return got
+
+
 @router.get("/services")
 def services(db: Session = Depends(get_db), _=Depends(admin)):
     """What is published under Web Services in Business Central, to fill in odata: endpoints."""

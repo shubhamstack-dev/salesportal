@@ -4,13 +4,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .db import CORS_ORIGINS, Base, engine
+from .db import add_missing_columns, CORS_ORIGINS, Base, engine
 from .routers import attendance, auth, dashboard, expenses, integration, masters, org, sales
 
 
 @asynccontextmanager
 async def lifespan(_app):
     Base.metadata.create_all(engine)    # creates missing tables; database/schema.sql has the same structure
+    add_missing_columns()               # and columns added by later versions to existing tables
     yield
 
 
