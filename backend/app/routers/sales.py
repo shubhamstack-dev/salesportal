@@ -99,7 +99,7 @@ def doc_out(db: Session, d: SalesDoc, full=False) -> dict:
                    distance_m=dist, created_at=iso_utc(d.created_at), paid=order_paid(db, d.id) if d.kind == "order" else None,
                    customer_detail={"code": c.code, "name": c.name, "gstin": c.gstin, "state": STATES.get(c.state, ""), "state_code": c.state,
                                     "address": ", ".join(x for x in [c.address, c.city, c.pin] if x), "street": c.address, "city": c.city,
-                                    "pin": c.pin, "phone": c.phone, "email": c.email, "terms": c.terms,
+                                    "pin": c.pin, "phone": c.phone, "email": c.email, "terms": c.terms, "price_group": c.price_group,
                                     "state_abbr": next((k for k, v in STATE_ABBR.items() if v == c.state), c.state)},
                    rep_code=rep.emp_code if rep else "", delivery_text=d.delivery_date.isoformat() if d.delivery_date else None,
                    lines=[{"material": l.material_code, "name": l.name, "uom": l.uom, "hsn": l.hsn, "qty": f(l.qty), "price": f(l.price),

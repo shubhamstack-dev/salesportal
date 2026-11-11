@@ -26,7 +26,7 @@ def price_for(db: Session, cust: Customer | None, material_code: str, qty: float
             and float(p.min_qty or 0) <= max(qty, 0)]
 
     def pick(kind, code=""):
-        c = [p for p in rows if p.type == kind and (kind == "all" or p.code.lower() == (code or "").lower())]
+        c = [p for p in rows if p.type == kind and (kind == "all" or (p.code or "").strip().lower() == (code or "").strip().lower())]
         return max(c, key=lambda p: float(p.min_qty or 0)) if c else None
 
     return (cust and pick("customer", cust.code)) or (cust and cust.price_group and pick("group", cust.price_group)) or pick("all")
@@ -37,10 +37,18 @@ def price_label(p: Price) -> str:
 
 
 def price_incl(db: Session, p: Price | None) -> bool:
-    """Whether a price includes GST: as Dynamics marked the price, else the company setting."""
-    if p is not None and p.incl_gst is not None:
-        return bool(p.incl_gst)
-    return bool(get_settings(db).get("prices_incl_gst"))
+    """Whether a price already includes GST, by Samurai Foods' rule:
+    the MRP (the item's Unit Price, the price for all customers, and an "MRP" price group) includes GST;
+    SRP, CRP, HORECA and other price groups, and prices for one customer, do not: GST is added to them."""
+    if p is None:
+        return False
+    s = get_settings(db)
+    if p.type == "all":
+        return bool(s.get("mrp_incl_gst", True))
+    if p.type == "group":
+        groups = {g.strip().upper() for g in str(s.get("incl_gst_groups") or "").replace(";", ",").split(",") if g.strip()}
+        return (p.code or "").strip().upper() in groups
+    return False
 
 
 def gst_of(db: Session, material: Material) -> tuple[float, float]:

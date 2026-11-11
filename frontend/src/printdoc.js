@@ -186,6 +186,8 @@ export async function printSalesDoc(d, settings) {
       ['Terms', c.terms, 'Your Ref.', d.po_ref], ['Salesperson', d.rep, 'Dynamics No.', d.sync?.no]]
     : [['Order No.', d.no, 'Dated', longDate(d.date), 1], ['Quotation No.', d.quote_no, 'Delivery Date', longDate(d.delivery)],
       ['Terms', c.terms, 'Buyer Ref.', d.po_ref], ['Salesperson', d.rep, 'Dynamics No.', d.sync?.no]]
+  pairs.splice(pairs.length - 1, 0, ['Price Group', c.price_group || 'MRP', 'Customer No.', quote ? '' : c.code])
+  if (quote) pairs[pairs.length - 2][2] = '', pairs[pairs.length - 2][3] = ''
   const grid = `<table class="grid">${pairs.map(([a, av, b2, bv, bold]) => `<tr><th>${a}</th><td${bold ? ' class="b"' : ''}>${esc(av || '')}</td>
     <th>${b2}</th><td${bold ? ' class="b"' : ''}>${esc(bv || '')}</td></tr>`).join('')}</table>`
   const addr = `<div class="nm">${esc(c.name)}</div><div class="ad">${[...lines(c.street), [c.city, c.pin].filter(Boolean).join(', ')].filter(Boolean).map(esc).join('<br>')}</div>`

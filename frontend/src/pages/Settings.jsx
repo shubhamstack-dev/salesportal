@@ -23,7 +23,7 @@ export default function Settings() {
         ifsc: f.ifsc.trim().toUpperCase(), upi_id: f.upi_id.trim(), jurisdiction: f.jurisdiction.trim(), terms: f.terms,
         quote_declaration: f.quote_declaration.trim(), order_declaration: f.order_declaration.trim() },
       prefixes: { order: f.p_order, quote: f.p_quote, payment: f.p_payment, expense: f.p_expense }, quote_days: +f.quote_days || 15,
-      need_approval: !!f.need_approval, prices_incl_gst: !!f.prices_incl_gst, credit_check: f.credit_check, price_override: !!f.price_override, round_off: !!f.round_off,
+      need_approval: !!f.need_approval, mrp_incl_gst: !!f.mrp_incl_gst, incl_gst_groups: f.incl_gst_groups.trim().toUpperCase(), credit_check: f.credit_check, price_override: !!f.price_override, round_off: !!f.round_off,
       shift_start: f.shift_start, grace_min: +f.grace_min || 0, full_day_hrs: +f.full_day_hrs || 8, half_day_hrs: +f.half_day_hrs || 4, punch_needs_location: !!f.punch_needs_location,
       maps_key: f.maps_key.trim(), geofence_m: +f.geofence_m || 300 }
     try { await api('/api/settings', { method: 'PUT', body }); toast('Settings saved'); reload(); reloadMe() } catch (e2) { toast(e2.message) }
@@ -58,7 +58,8 @@ export default function Settings() {
       <label className="chk"><input type="checkbox" name="need_approval" defaultChecked={s.need_approval} /> Sales representatives' orders need approval</label>
       <label className="chk"><input type="checkbox" name="price_override" defaultChecked={s.price_override} /> Sales staff may change prices</label>
       <label className="chk"><input type="checkbox" name="round_off" defaultChecked={s.round_off} /> Round totals to the rupee</label>
-      <label className="chk wide"><input type="checkbox" name="prices_incl_gst" defaultChecked={s.prices_incl_gst} /> <span><b>Prices include GST</b> (Business Central "Price Inclusive of Tax": the item's Unit Price is the MRP with GST). Used when Dynamics does not mark the price itself.</span></label></div></div>
+      <label className="chk wide"><input type="checkbox" name="mrp_incl_gst" defaultChecked={s.mrp_incl_gst} /> <span><b>MRP includes GST</b>: the item's Unit Price and prices for all customers are MRP, with GST in them.</span></label>
+      <label className="field wide">Price groups whose prices include GST (others, such as SRP, CRP and HORECA, get GST added)<input className="inp" name="incl_gst_groups" defaultValue={s.incl_gst_groups} placeholder="MRP" /></label></div></div>
     <div className="card"><h2>Shift and Time In / Time Out</h2><div className="form">
       <label className="field">Shift starts at<input type="time" className="inp" name="shift_start" defaultValue={s.shift_start} /></label>
       <label className="field">Grace before late (minutes)<input className="inp" name="grace_min" defaultValue={s.grace_min} /></label>

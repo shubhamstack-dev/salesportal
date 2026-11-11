@@ -402,49 +402,62 @@ UNITS = [{"Item_No": "SF-001-500", "Code": "KG", "Qty_per_Unit_of_Measure": 1},
          {"Item_No": "SF-002-500", "Code": "KG", "Qty_per_Unit_of_Measure": 1}]
 
 
-def test_prices_inclusive_of_gst_like_business_central(c, monkeypatch):
-    """The report's own example: MRP 900 with GST, 20% line discount, 2 kg, 5% GST ->
-    amount without GST 1371.43, nett 1440 (720/kg), discount 360. Pkts from the PACKET unit."""
-    items = [{**ITEMS[0], "Unit_Price": 900, "Price_Includes_VAT": True}, {**ITEMS[1], "Unit_Price": 640, "Price_Includes_VAT": False}]
+def test_mrp_includes_gst_price_groups_do_not(c, monkeypatch):
+    """MRP (item Unit Price / all customers) has GST in it; SRP, CRP and HORECA prices get GST added.
+    Each customer gets its own price group's price; the MRP only when its group has none for the item.
+    The report's example: MRP 900, 20% discount, 2 kg, 5% GST -> 1371.43 + 68.57 = 1440. Pkts from the PACKET unit."""
+    items = [{**ITEMS[0], "Unit_Price": 900}, {**ITEMS[1], "Unit_Price": 640}]
+    groups = [("SRP", 700), ("CRP", 650), ("HORECA", 600)]
+    prices = [{"Price_Type": "Sale", "Source_Type": "Customer Price Group", "Source_No": g, "Product_No": "SF-001-500", "Unit_of_Measure_Code": "KG",
+               "Minimum_Quantity": 0, "Unit_Price": v, "Starting_Date": EMPTY, "Ending_Date": EMPTY, "Status": "Active"} for g, v in groups]
+    custs = [{**CUSTOMERS[0], "No": f"G-{g}", "Name": f"{g} buyer", "Customer_Price_Group": g} for g, _ in groups] + \
+            [{**CUSTOMERS[0], "No": "G-NONE", "Name": "No group", "Customer_Price_Group": ""},
+             {**CUSTOMERS[0], "No": "G-horeca2", "Name": "Lower case group", "Customer_Price_Group": " horeca "}]
     monkeypatch.setitem(PAGES, "Item_Card", items)
-    monkeypatch.setitem(PAGES, "PriceListLines", [])
+    monkeypatch.setitem(PAGES, "PriceListLines", prices)
+    monkeypatch.setitem(PAGES, "Customer_Card", custs)
     monkeypatch.setitem(PAGES, "Item_Units_of_Measure", UNITS)
-    connect(c, units="odata:Item_Units_of_Measure", prices="")
-    c.put("/api/settings", json={"dynamics": {"auto_push": True}, "round_off": False})
-    with SessionLocal() as db:
-        db.query(Price).delete(); db.commit()
-    c.post("/api/integration/pull-all")
+    monkeypatch.setitem(globals(), "CUSTOMERS", CUSTOMERS + custs)      # Business Central knows them too
+    connect(c, units="odata:Item_Units_of_Measure")
+    c.put("/api/settings", json={"dynamics": {"auto_push": True}, "round_off": False, "mrp_incl_gst": True, "incl_gst_groups": "MRP"})
+    res = {x["entity"]: x for x in c.post("/api/integration/pull-all").json()["results"]}
+    assert res["prices"]["status"] in ("ok", "warning"), res["prices"]
     with SessionLocal() as db:
         assert float(db.query(Material).filter_by(code="SF-001-500").one().pack_qty) == 0.5
         assert float(db.query(Material).filter_by(code="SF-002-500").one().pack_qty) == 0     # no PACKET unit: no packets
-        assert db.query(Price).filter_by(material_code="SF-001-500").one().incl_gst is True
-    cid = next(x["id"] for x in c.get("/api/customers").json() if x["code"] == "C0001")
+    ids = {x["code"]: x["id"] for x in c.get("/api/customers").json()}
     from app.services.common import local_today
-    r = c.post("/api/docs", json={"kind": "order", "customer_id": cid, "date": local_today().isoformat(),
-                                  "lines": [{"material": "SF-001-500", "qty": 2, "disc": 20}, {"material": "SF-002-500", "qty": 1}]})
-    assert r.status_code == 200, r.text
-    d = c.get(f"/api/docs/{r.json()['id']}").json()
-    l1, l2 = d["lines"]
-    assert l1["price"] == 900 and l1["price_incl"] and l1["taxable"] == 1371.43 and l1["gst"] == 68.57      # 1440 with GST
-    assert l1["mrp"] == 900 and l1["pack_qty"] == 0.5
-    assert not l2["price_incl"] and l2["taxable"] == 640 and l2["gst"] == 32                               # GST added on top
-    assert d["totals"]["total"] == 1440 + 672
-    # Business Central gets the price without GST, so its amount is the portal's
-    sent = BC_DOCS[-1]["salesOrderLines"]
-    assert abs(sent[0]["unitPrice"] * 2 * 0.8 - 1371.43) < 0.01 and sent[1]["unitPrice"] == 640
+
+    def line(cust, mat="SF-001-500", qty=1, disc=0):
+        r = c.post("/api/docs", json={"kind": "order", "customer_id": ids[cust], "date": local_today().isoformat(),
+                                      "lines": [{"material": mat, "qty": qty, "disc": disc}]})
+        assert r.status_code == 200, r.text
+        return c.get(f"/api/docs/{r.json()['id']}").json()
+
+    for g, v in groups:                                    # group price, GST added on top
+        d = line(f"G-{g}")
+        l = d["lines"][0]
+        assert (l["price"], l["price_incl"], l["taxable"], l["gst"]) == (v, False, v, v * 0.05), (g, l)
+        assert l["price_source"] == f"{g} price" and d["customer_detail"]["price_group"] == g
+    d = line("G-horeca2")                                  # " horeca " still finds HORECA
+    assert d["lines"][0]["price"] == 600 and not d["lines"][0]["price_incl"]
+    d = line("G-NONE", qty=2, disc=20)                     # no group: the MRP, GST inside it
+    l = d["lines"][0]
+    assert l["price"] == 900 and l["price_incl"] and l["taxable"] == 1371.43 and l["gst"] == 68.57 and d["total"] == 1440
+    assert l["mrp"] == 900 and l["pack_qty"] == 0.5
+    d = line("G-SRP", mat="SF-002-500")                    # SRP group has no price for this item: its MRP
+    assert d["lines"][0]["price"] == 640 and d["lines"][0]["price_incl"] and d["total"] == 640
+    # Business Central gets prices without GST, so its amounts are the portal's
+    assert d["sync"]["status"] == "synced", d["sync"]
+    sent = BC_DOCS[-1]["salesOrderLines"][0]
+    assert abs(sent["unitPrice"] * 1.05 - 640) < 0.01
 
 
-def test_setting_decides_when_dynamics_does_not_mark_prices(c, monkeypatch):
-    monkeypatch.setitem(PAGES, "Item_Card", [{**ITEMS[0], "Unit_Price": 660}])
-    connect(c, prices="", units="")
-    c.put("/api/settings", json={"prices_incl_gst": True, "round_off": False})
-    with SessionLocal() as db:
-        db.query(Price).delete(); db.commit()
-    p = c.post("/api/integration/import/materials/api").json()
-    c.post("/api/integration/import/materials/apply", json={"import_id": p["import_id"], "map": p["map"]})
-    cid = next(x["id"] for x in c.get("/api/customers").json() if x["code"] == "C0001")
+def test_mrp_group_can_be_listed_as_including_gst(c):
+    c.put("/api/settings", json={"incl_gst_groups": "MRP, HORECA", "round_off": False})
+    ids = {x["code"]: x["id"] for x in c.get("/api/customers").json()}
     from app.services.common import local_today
-    d = c.post("/api/docs", json={"kind": "quote", "customer_id": cid, "date": local_today().isoformat(),
+    d = c.post("/api/docs", json={"kind": "quote", "customer_id": ids["G-HORECA"], "date": local_today().isoformat(),
                                   "lines": [{"material": "SF-001-500", "qty": 1}]}).json()
-    assert d["total"] == 660                     # 628.57 + 31.43 GST
-    c.put("/api/settings", json={"prices_incl_gst": False})
+    assert d["total"] == 600                               # now 571.43 + 28.57
+    c.put("/api/settings", json={"incl_gst_groups": "MRP"})
