@@ -132,6 +132,7 @@ CREATE TABLE IF NOT EXISTS `prices` (
   `min_qty` decimal(15,3) NOT NULL,
   `valid_from` date DEFAULT NULL,
   `valid_to` date DEFAULT NULL,
+  `incl_gst` tinyint(1) NULL,
   PRIMARY KEY (`id`),
   KEY `ix_prices_material_code` (`material_code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
@@ -217,6 +218,7 @@ CREATE TABLE IF NOT EXISTS `sales_doc_lines` (
   `taxable` decimal(15,2) NOT NULL,
   `gst` decimal(15,2) NOT NULL,
   `price_source` varchar(40) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `price_incl` tinyint(1) NULL,
   PRIMARY KEY (`id`),
   KEY `ix_sales_doc_lines_doc_id` (`doc_id`),
   CONSTRAINT `sales_doc_lines_ibfk_1` FOREIGN KEY (`doc_id`) REFERENCES `sales_docs` (`id`) ON DELETE CASCADE

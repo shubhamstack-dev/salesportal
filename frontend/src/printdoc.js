@@ -133,35 +133,47 @@ export async function printSalesDoc(d, settings) {
   const title = quote ? 'QUOTATION' : 'SALES ORDER'
   const coName = co.legal_name || co.name
 
-  // lines: Qty, Pkts. (from the pack size), MRP, Disc %, Rate, GST amount, Nett rate (incl. GST), Amount
+  // Lines worked out as the Business Central report (SF Sales Invoice GST, CalcLineValues) does:
+  //   Rate/Kg = amount without GST / qty; Nett Rate = (amount + GST) / qty; MRP/Kg = the item's Unit Price;
+  //   gross (before discount, with GST) = amount / (1 - disc) x (1 + GST %) / qty;
+  //   gross equal to the MRP (within 0.05): sold at MRP, discount = MRP x qty x disc;
+  //   otherwise a customer rate: discount only when one was given, = gross x qty - nett amount.
+  //   Pkts. = qty / the PACKET unit, rounded.
   const uoms = [...new Set(d.lines.map((l) => (l.uom || '').toUpperCase()).filter(Boolean))]
   const unit = uoms.length === 1 ? uoms[0][0] + uoms[0].slice(1).toLowerCase() : ''
   let tq = 0, tp = 0, tg = 0, ta = 0, disc = 0, anyPk = false
   const rows = d.lines.map((l, i) => {
-    const amount = (+l.taxable || 0) + (+l.gst || 0)
-    const pk = +l.pack_qty > 0 ? (+l.qty || 0) / +l.pack_qty : null
+    const q = +l.qty || 0, tax = +l.taxable || 0, gst = (+l.gst || 0) + (+l.cess || 0)
+    const nettAmt = tax + gst
+    const frac = (+l.disc || 0) / 100
+    const mrp = +l.mrp || 0
+    const gross = q && frac < 1 ? tax / (1 - frac) * (1 + ((+l.gst_rate || 0) + (+l.cess_rate || 0)) / 100) / q : mrp
+    let lineDisc = 0, discPct = 0
+    if (mrp && Math.abs(gross - mrp) <= 0.05) { discPct = frac * 100; lineDisc = Math.round(mrp * q * frac * 100) / 100 }
+    else if (frac > 0) { discPct = frac * 100; lineDisc = Math.round((gross * q - nettAmt) * 100) / 100 }
+    const pk = +l.pack_qty > 0 ? Math.round(q / +l.pack_qty) : null
     if (pk != null) { anyPk = true; tp += pk }
-    tq += +l.qty || 0; tg += +l.gst || 0; ta += amount; disc += (+l.qty || 0) * (+l.price || 0) * (+l.disc || 0) / 100
+    tq += q; tg += gst; ta += nettAmt; disc += lineDisc
     return `<tr><td class="l">${i + 1}</td><td class="l"><div class="code">${esc(l.material)}</div>${esc(l.name)}
       <div class="meta">${l.hsn ? `HSN: ${esc(l.hsn)}` : ''}</div></td>
-      <td>${n2(l.qty)}${unit ? '' : ' ' + esc(l.uom)}</td><td>${pk != null ? n2(pk) : ''}</td><td>${+l.mrp ? n2(l.mrp) : ''}</td>
-      <td>${n2(l.disc)}</td><td>${n2(l.price)}</td><td>${n2(l.gst)}</td><td>${n2(l.qty ? amount / l.qty : 0)}</td><td>${n2(amount)}</td></tr>`
+      <td>${n2(q)}${unit ? '' : ' ' + esc(l.uom)}</td><td>${pk != null ? n2(pk) : ''}</td><td>${mrp ? n2(mrp) : ''}</td>
+      <td>${n2(discPct)}</td><td>${n2(q ? tax / q : 0)}</td><td>${n2(gst)}</td><td>${n2(q ? nettAmt / q : 0)}</td><td>${n2(nettAmt)}</td></tr>`
   }).join('')
+  if (disc < 0) disc = 0
+  // invoice rounding: its own row with only the amount, as in the Business Central invoice
+  const roundRow = t.round_off ? `<tr><td></td><td class="l">Rounding</td><td></td><td></td><td></td><td></td><td></td><td></td><td></td><td>${n2(t.round_off)}</td></tr>` : ''
+  ta += +t.round_off || 0
   const per = unit ? `/${esc(unit)}` : ''
   const items = `<table class="items"><thead><tr><th class="l">S.No.</th><th class="l">Description of Goods</th><th>Qty${unit ? ` (${esc(unit)})` : ''}</th>
     <th>Pkts.</th><th>MRP${per}</th><th>Disc %</th><th>Rate${per}</th><th>GST</th><th>Nett Rate</th><th>Amount</th></tr></thead>
-    <tbody>${rows}<tr class="gt"><td></td><td class="l">GRAND TOTAL</td><td>${unit ? n2(tq) : ''}</td><td>${anyPk ? n2(tp) : ''}</td><td></td><td></td><td></td>
+    <tbody>${rows}${roundRow}<tr class="gt"><td></td><td class="l">GRAND TOTAL</td><td>${unit ? n2(tq) : ''}</td><td>${anyPk ? n2(tp) : ''}</td><td></td><td></td><td></td>
     <td>${n2(tg)}</td><td></td><td>${n2(ta)}</td></tr></tbody></table>`
 
-  const rates = [...new Set(d.lines.map((l) => +l.gst_rate))]
-  const one = rates.length === 1 ? rates[0] : null
   const r = (k, v, cls = 't') => `<div class="r ${cls}"><span>${k}</span><span>${v}</span></div>`
-  const taxRows = t.intra
-    ? r(`CGST${one != null ? ` @ ${qty(one / 2)}%` : ''}`, n2(t.cgst)) + r(`SGST${one != null ? ` @ ${qty(one / 2)}%` : ''}`, n2(t.sgst))
-    : r(`IGST${one != null ? ` @ ${qty(one)}%` : ''}`, n2(t.igst))
+  const taxRows = t.intra ? r('CGST', n2(t.cgst)) + r('SGST', n2(t.sgst)) : r('IGST', n2(t.igst))
   const sum = `<div class="sum">${r('Total Discount', n2(disc), 'k')}${r('TOTAL AMOUNT PAYABLE', n2(t.total), 'big')}<div class="sep"></div>
     ${r('Taxable Value', n2(t.taxable))}${(t.pre || []).map((x) => r(esc(x.name), n2(x.amount))).join('')}${taxRows}
-    ${t.cess ? r('Cess', n2(t.cess)) : ''}${(t.post || []).map((x) => r(esc(x.name), n2(x.amount))).join('')}${t.round_off ? r('Round off', n2(t.round_off)) : ''}
+    ${t.cess ? r('Cess', n2(t.cess)) : ''}${(t.post || []).map((x) => r(esc(x.name), n2(x.amount))).join('')}
     ${r('Total', n2(t.total), 'tot')}</div>`
   const words = `<div class="words"><span class="lb">Amount Chargeable (in words)</span><span class="tx">${inWords(t.total)}</span></div>
     ${d.remarks ? `<div class="note">Remarks: ${esc(d.remarks)}</div>` : ''}`

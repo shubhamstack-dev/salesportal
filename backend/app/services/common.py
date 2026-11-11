@@ -29,13 +29,13 @@ DEFAULT_SETTINGS = {
               "quote_declaration": "This quotation is an offer of prices only and is not a tax invoice. Stock is subject to availability at the time of order confirmation.",
               "order_declaration": "This sales order confirms the goods, quantities and prices agreed. It is not a tax invoice; the tax invoice is issued at dispatch."},
     "prefixes": {"order": "SO", "quote": "QT", "payment": "RC", "expense": "EX"},
-    "quote_days": 15, "need_approval": True, "credit_check": "warn", "price_override": False, "round_off": True,
+    "prices_incl_gst": False, "quote_days": 15, "need_approval": True, "credit_check": "warn", "price_override": False, "round_off": True,
     "shift_start": "09:30", "grace_min": 15, "full_day_hrs": 8, "half_day_hrs": 4, "punch_needs_location": True,
     "maps_key": "", "geofence_m": 300,
     "dynamics": {"product": "bc", "base_url": "", "token": "", "tenant_id": "", "client_id": "", "client_secret": "",
                  "scope": "https://api.businesscentral.dynamics.com/.default", "payments_negative": True,
                  "api_map": {}, "gst_rates": {}, "auto_push": False,
-                 "ep": {"company": "companyInformation", "customers": "customers", "materials": "items", "attributes": "", "prices": "", "hsn": "", "charges": "",
+                 "pack_uom": "PACKET", "ep": {"company": "companyInformation", "customers": "customers", "materials": "items", "units": "", "attributes": "", "prices": "", "hsn": "", "charges": "",
                         "quotes": "salesQuotes", "orders": "salesOrders", "payments": "", "expenses": ""}},
 }
 SECRET_KEYS = ("token", "client_secret")

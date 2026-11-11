@@ -104,7 +104,7 @@ def doc_out(db: Session, d: SalesDoc, full=False) -> dict:
                    rep_code=rep.emp_code if rep else "", delivery_text=d.delivery_date.isoformat() if d.delivery_date else None,
                    lines=[{"material": l.material_code, "name": l.name, "uom": l.uom, "hsn": l.hsn, "qty": f(l.qty), "price": f(l.price),
                            "disc": f(l.disc), "gst_rate": f(l.gst_rate), "taxable": f(l.taxable), "gst": f(l.gst), "price_source": l.price_source,
-                           **_print_extra(db, l.material_code)} for l in d.lines])
+                           "price_incl": bool(l.price_incl), **_print_extra(db, l.material_code)} for l in d.lines])
     return out
 
 
@@ -155,7 +155,7 @@ def _save(db: Session, d: SalesDoc | None, body: DocIn, me: User) -> SalesDoc:
         d.lat, d.lng = body.lat, body.lng
     d.lines = [SalesDocLine(line_no=i + 1, material_code=l["material"], name=l["name"], uom=l["uom"], hsn=l["hsn"], qty=l["qty"],
                             price=l["price"], disc=l["disc"], gst_rate=l["gst_rate"], cess_rate=l["cess_rate"], taxable=l["taxable"],
-                            gst=l["gst"], price_source=l["price_source"]) for i, l in enumerate(lines)]
+                            gst=l["gst"], price_source=l["price_source"], price_incl=l["price_incl"]) for i, l in enumerate(lines)]
     if (d.kind == "quote" and status == "open") or (d.kind == "order" and status == "approved"):
         d.sync_status, d.sync_error = "pending", None
         if status == "approved":

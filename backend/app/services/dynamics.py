@@ -48,6 +48,7 @@ ENT = {
         "category": ["Item Category Code", "Category", "itemCategoryCode"], "price": ["Unit Price", "unitPrice", "Price"],
         "mrp": ["MRP", "MRP Price", "Maximum Retail Price", "MRP/Kg"],
         "pack": ["Pack Size", "Net Weight", "netWeight", "Qty per Pack", "Pack Qty"],
+        "incl": ["Price Includes VAT", "Price Inclusive of Tax", "Price Includes Tax", "Price Incl. Tax", "priceIncludesTax"],
         "blocked": ["Blocked", "Sales Blocked", "blocked"]}},
     "attributes": {"label": "Material attributes", "hint": r"attrib", "fields": {
         "material": ["Item No.", "No.", "Item", "ItemNumber", "Material", "itemNumber"],
@@ -60,7 +61,7 @@ ENT = {
         "uom": ["Unit of Measure Code", "Unit of Measure", "UOM", "UnitId"], "price": ["Unit Price", "Price", "Amount", "unitPrice"],
         "min_qty": ["Minimum Quantity", "Min. Quantity", "Min Qty", "QuantityAmountFrom"],
         "from": ["Starting Date", "Valid From", "From Date", "FromDate"], "to": ["Ending Date", "Valid To", "To Date", "ToDate"],
-        "status": ["Status", "Line Status"], "price_type": ["Price Type"]}},
+        "status": ["Status", "Line Status"], "price_type": ["Price Type"], "incl": ["Price Includes VAT", "Price Inclusive of Tax", "Price Includes Tax", "Price Incl. Tax", "priceIncludesTax"]}},
     "hsn": {"label": "HSN codes", "hint": r"hsn|gst|sac", "fields": {
         "code": ["HSN/SAC Code", "Code", "HSN", "HSN Code"], "description": ["Description", "Name"],
         "rate": ["GST %", "GST Rate", "GST Rate %", "Rate", "Tax %"], "cess": ["Cess %", "Cess"],
@@ -304,10 +305,11 @@ def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_
             if m.get("price") and price > 0:
                 p = db.scalar(select(Price).where(Price.type == "all", Price.material_code == code, Price.min_qty == 0,
                                                   Price.valid_from.is_(None), Price.valid_to.is_(None)))
+                incl = _yes(get(r, "incl")) if m.get("incl") else None
                 if p:
-                    p.price, p.uom = price, mat.uom
+                    p.price, p.uom, p.incl_gst = price, mat.uom, incl
                 else:
-                    db.add(Price(type="all", code="", material_code=code, uom=mat.uom, price=price, min_qty=0))
+                    db.add(Price(type="all", code="", material_code=code, uom=mat.uom, price=price, min_qty=0, incl_gst=incl))
     elif ent == "attributes":
         mats = {x.code: x for x in db.scalars(select(Material))}
         for i, r in enumerate(rows):
@@ -336,7 +338,8 @@ def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_
             code, typ = _s(get(r, "code")), _s(get(r, "type")).lower()
             kind = "group" if "group" in typ else "all" if ("all" in typ or (not typ and not code)) else "customer" if ("customer" in typ or typ == "0") else ("group" if code else "all")
             fresh.append(Price(type=kind, code="" if kind == "all" else code[:40], material_code=mat, uom=_s(get(r, "uom"))[:10], price=price,
-                               min_qty=_num(get(r, "min_qty")), valid_from=_date(get(r, "from")), valid_to=_date(get(r, "to"))))
+                               min_qty=_num(get(r, "min_qty")), valid_from=_date(get(r, "from")), valid_to=_date(get(r, "to")),
+                               incl_gst=_yes(get(r, "incl")) if m.get("incl") else None))
         res["added"], res["updated"] = len(fresh), db.query(Price).count()
         if not dry:
             db.query(Price).delete()
@@ -500,7 +503,8 @@ def item_price_fallback(db: Session, rows: list[dict], m: dict) -> int:
     for r in rows:
         code, price = _s(r.get(m["code"])), _num(r.get(m["price"]))
         if code in mats and code not in have and price > 0:
-            db.add(Price(type="all", code="", material_code=code, uom=mats[code].uom, price=price, min_qty=0))
+            incl = _yes(r.get(m["incl"])) if m.get("incl") else None
+            db.add(Price(type="all", code="", material_code=code, uom=mats[code].uom, price=price, min_qty=0, incl_gst=incl))
             have.add(code)
             n += 1
     return n
@@ -578,7 +582,10 @@ def payment_row(db: Session, p: Payment, negative: bool) -> dict:
 
 def order_payload(db: Session, d: SalesDoc) -> dict:
     c, rep = db.get(Customer, d.customer_id), _emp(db, d.rep_id)
-    lines = [{"lineType": "Item", "lineObjectNumber": l.material_code, "quantity": float(l.qty), "unitPrice": float(l.price),
+    def unit_price(l):     # a price that includes GST goes as its value without GST, so the amount matches the portal
+        p = float(l.price)
+        return round(p / (1 + (float(l.gst_rate) + float(l.cess_rate or 0)) / 100), 5) if l.price_incl else p
+    lines = [{"lineType": "Item", "lineObjectNumber": l.material_code, "quantity": float(l.qty), "unitPrice": unit_price(l),
               "discountPercent": float(l.disc), "unitOfMeasureCode": l.uom or None} for l in d.lines]
     body = {"customerNumber": c.code, "externalDocumentNumber": d.no, "salesperson": rep.emp_code or None}
     if d.kind == "quote":
@@ -671,3 +678,27 @@ def company_from_dynamics(s: dict) -> dict:
     bank = {"bank_name": pick("bank_name"), "branch": pick("branch"), "account_no": pick("account_no"), "ifsc": pick("ifsc").upper(),
             "upi_id": find("upi")}
     return {"company": {k: v for k, v in company.items() if v}, "print": {k: v for k, v in bank.items() if v}, "fields": len(norm)}
+
+
+
+def apply_packs(db: Session, s: dict, token: str | None = None, cache: dict | None = None) -> dict:
+    """Packets per item for the printed Pkts. column, as the Business Central report does it: the item's PACKET
+    unit of measure (Item Units of Measure, Qty. per Unit of Measure). Items without that unit print no packets."""
+    ep = s["dynamics"]["ep"].get("units")
+    if not ep:
+        return {"items": 0}
+    pack_code = (s["dynamics"].get("pack_uom") or "PACKET").strip().upper()
+    token = token or access_token(s)
+    rows = api_pull(s, "units", token, cache)
+    norm = lambda r: {re.sub(r"[^a-z0-9]", "", k.lower()): v for k, v in r.items()}
+    found = {}
+    for r in rows:
+        n = norm(r)
+        item = _s(n.get("itemno") or n.get("itemnumber") or n.get("no"))
+        code = _s(n.get("code") or n.get("unitofmeasurecode")).upper()
+        qty = _num(n.get("qtyperunitofmeasure") or n.get("qtyperunit") or n.get("quantityperunitofmeasure"))
+        if item and code == pack_code and qty > 0:
+            found[item] = qty
+    for mat in db.scalars(select(Material)):
+        mat.pack_qty = found.get(mat.code, 0)
+    return {"items": len(found)}

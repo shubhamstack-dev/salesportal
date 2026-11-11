@@ -85,6 +85,12 @@ def apply(ent: str, body: MapIn, db: Session = Depends(get_db), me: User = Depen
     m = body.map or (D.api_map(s, ent, sh["headers"]) if from_api else D.auto_map(ent, sh["headers"]))
     rates = _rates(db, body.gst_rates)
     res = D.apply_rows(db, ent, sh["rows"], m, dry=False, gst_rates=rates)
+    if ent == "materials" and from_api:
+        try:
+            db.flush()
+            res["packs"] = D.apply_packs(db, s)["items"]
+        except HTTPException as e:
+            res["errors"] = [*res["errors"], f"Packets (Item Units of Measure): {e.detail}"]
     patch = {"sync_info": {**s.get("sync_info", {}), ent: iso_utc(now_utc())}, "dynamics": {}}
     if from_api:      # remember the columns, so "Download all" and the next download use them
         patch["dynamics"]["api_map"] = {**(s["dynamics"].get("api_map") or {}), ent: m}
@@ -135,6 +141,10 @@ def pull_all(db: Session = Depends(get_db), me: User = Depends(admin)):
         res = D.apply_rows(db, ent, rows, m, dry=False, gst_rates=rates)
         if ent == "materials":
             items = (rows, m)
+            try:
+                res["packs"] = D.apply_packs(db, s, token, cache)["items"]
+            except HTTPException as e:
+                res["errors"] = [*res["errors"], f"Packets (Item Units of Measure): {e.detail}"]
         if ent == "prices" and items:
             db.flush()
             res["item_prices"] = D.item_price_fallback(db, *items)

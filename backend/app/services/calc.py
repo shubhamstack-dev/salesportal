@@ -36,6 +36,13 @@ def price_label(p: Price) -> str:
     return "customer price" if p.type == "customer" else f"{p.code} price" if p.type == "group" else "base price"
 
 
+def price_incl(db: Session, p: Price | None) -> bool:
+    """Whether a price includes GST: as Dynamics marked the price, else the company setting."""
+    if p is not None and p.incl_gst is not None:
+        return bool(p.incl_gst)
+    return bool(get_settings(db).get("prices_incl_gst"))
+
+
 def gst_of(db: Session, material: Material) -> tuple[float, float]:
     h = db.get(HsnCode, material.hsn) if material.hsn else None
     return (float(h.rate), float(h.cess)) if h else (0.0, 0.0)
@@ -62,7 +69,11 @@ def build_lines(db: Session, cust: Customer | None, on: date, lines_in: list[dic
             if not p or abs(float(l["price"]) - price) > 0.0001:
                 price, source = float(l["price"]), "entered"
         gst, cess = gst_of(db, m)
-        taxable = r2(qty * price * (1 - disc / 100))
+        incl = price_incl(db, p)
+        # Business Central "Price Inclusive of Tax": the price (e.g. the MRP) already has GST in it, so the taxable
+        # value is taken out of it; otherwise GST is added on top
+        gross = qty * price * (1 - disc / 100)
+        taxable = r2(gross / (1 + (gst + cess) / 100)) if incl else r2(gross)
         if qty <= 0:
             problems.append(f"{m.code}: enter a quantity above zero.")
         if price <= 0:
@@ -71,7 +82,7 @@ def build_lines(db: Session, cust: Customer | None, on: date, lines_in: list[dic
             problems.append(f"{m.code}: discount must be from 0 to below 100%.")
         out.append({"material": m.code, "name": m.name, "uom": (p.uom if p and p.uom else m.uom), "hsn": m.hsn, "qty": qty,
                     "price": price, "disc": disc, "gst_rate": gst, "cess_rate": cess, "taxable": taxable,
-                    "gst": r2(taxable * gst / 100), "cess": r2(taxable * cess / 100), "price_source": source})
+                    "gst": r2(taxable * gst / 100), "cess": r2(taxable * cess / 100), "price_source": source, "price_incl": incl})
     return out, problems
 
 

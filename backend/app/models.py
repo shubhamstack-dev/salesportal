@@ -148,6 +148,7 @@ class Price(Base):
     min_qty: Mapped[Decimal] = mapped_column(Qty, default=0)
     valid_from: Mapped[date | None] = mapped_column(Date, nullable=True)
     valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
+    incl_gst: Mapped[bool | None] = mapped_column(Boolean, nullable=True)   # Price Includes VAT / Inclusive of Tax; None = the setting
 
 
 class HsnCode(Base):
@@ -217,6 +218,7 @@ class SalesDocLine(Base):
     taxable: Mapped[Decimal] = mapped_column(Money)
     gst: Mapped[Decimal] = mapped_column(Money)
     price_source: Mapped[str] = mapped_column(String(40), default="")
+    price_incl: Mapped[bool | None] = mapped_column(Boolean, nullable=True)   # price includes GST (Business Central "Price Inclusive of Tax")
 
 
 # ------------------------------------------------------------------ payments

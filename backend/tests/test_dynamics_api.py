@@ -395,3 +395,56 @@ def test_customer_address_lines_and_item_mrp_pack(c, monkeypatch):
         assert cu.address == "D.S Associates\nWard No.-41,\nRahmatnagar, Mirzapur" and cu.city == "Gorakhpur"
         m = db.query(Material).filter_by(code="SF-001-1000.").one()
         assert float(m.mrp) == 660 and float(m.pack_qty) == 1.0
+
+
+UNITS = [{"Item_No": "SF-001-500", "Code": "KG", "Qty_per_Unit_of_Measure": 1},
+         {"Item_No": "SF-001-500", "Code": "PACKET", "Qty_per_Unit_of_Measure": 0.5},
+         {"Item_No": "SF-002-500", "Code": "KG", "Qty_per_Unit_of_Measure": 1}]
+
+
+def test_prices_inclusive_of_gst_like_business_central(c, monkeypatch):
+    """The report's own example: MRP 900 with GST, 20% line discount, 2 kg, 5% GST ->
+    amount without GST 1371.43, nett 1440 (720/kg), discount 360. Pkts from the PACKET unit."""
+    items = [{**ITEMS[0], "Unit_Price": 900, "Price_Includes_VAT": True}, {**ITEMS[1], "Unit_Price": 640, "Price_Includes_VAT": False}]
+    monkeypatch.setitem(PAGES, "Item_Card", items)
+    monkeypatch.setitem(PAGES, "PriceListLines", [])
+    monkeypatch.setitem(PAGES, "Item_Units_of_Measure", UNITS)
+    connect(c, units="odata:Item_Units_of_Measure", prices="")
+    c.put("/api/settings", json={"dynamics": {"auto_push": True}, "round_off": False})
+    with SessionLocal() as db:
+        db.query(Price).delete(); db.commit()
+    c.post("/api/integration/pull-all")
+    with SessionLocal() as db:
+        assert float(db.query(Material).filter_by(code="SF-001-500").one().pack_qty) == 0.5
+        assert float(db.query(Material).filter_by(code="SF-002-500").one().pack_qty) == 0     # no PACKET unit: no packets
+        assert db.query(Price).filter_by(material_code="SF-001-500").one().incl_gst is True
+    cid = next(x["id"] for x in c.get("/api/customers").json() if x["code"] == "C0001")
+    from app.services.common import local_today
+    r = c.post("/api/docs", json={"kind": "order", "customer_id": cid, "date": local_today().isoformat(),
+                                  "lines": [{"material": "SF-001-500", "qty": 2, "disc": 20}, {"material": "SF-002-500", "qty": 1}]})
+    assert r.status_code == 200, r.text
+    d = c.get(f"/api/docs/{r.json()['id']}").json()
+    l1, l2 = d["lines"]
+    assert l1["price"] == 900 and l1["price_incl"] and l1["taxable"] == 1371.43 and l1["gst"] == 68.57      # 1440 with GST
+    assert l1["mrp"] == 900 and l1["pack_qty"] == 0.5
+    assert not l2["price_incl"] and l2["taxable"] == 640 and l2["gst"] == 32                               # GST added on top
+    assert d["totals"]["total"] == 1440 + 672
+    # Business Central gets the price without GST, so its amount is the portal's
+    sent = BC_DOCS[-1]["salesOrderLines"]
+    assert abs(sent[0]["unitPrice"] * 2 * 0.8 - 1371.43) < 0.01 and sent[1]["unitPrice"] == 640
+
+
+def test_setting_decides_when_dynamics_does_not_mark_prices(c, monkeypatch):
+    monkeypatch.setitem(PAGES, "Item_Card", [{**ITEMS[0], "Unit_Price": 660}])
+    connect(c, prices="", units="")
+    c.put("/api/settings", json={"prices_incl_gst": True, "round_off": False})
+    with SessionLocal() as db:
+        db.query(Price).delete(); db.commit()
+    p = c.post("/api/integration/import/materials/api").json()
+    c.post("/api/integration/import/materials/apply", json={"import_id": p["import_id"], "map": p["map"]})
+    cid = next(x["id"] for x in c.get("/api/customers").json() if x["code"] == "C0001")
+    from app.services.common import local_today
+    d = c.post("/api/docs", json={"kind": "quote", "customer_id": cid, "date": local_today().isoformat(),
+                                  "lines": [{"material": "SF-001-500", "qty": 1}]}).json()
+    assert d["total"] == 660                     # 628.57 + 31.43 GST
+    c.put("/api/settings", json={"prices_incl_gst": False})
