@@ -3,13 +3,13 @@ from datetime import date
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import Charge, Customer, HsnCode, Material, Payment, Price, SalesDoc, User
 from ..security import current_user, customers_for, may_use_customer, require
-from ..services.calc import gst_of, order_paid, outstanding, price_for
+from ..services.calc import doc_due, gst_of, order_paid, outstanding, pay_status, price_for
 from ..services.common import STATES, f, get_or_404, iso_utc, local_today, now_utc
 
 router = APIRouter(prefix="/api", tags=["masters"])
@@ -67,14 +67,19 @@ def tag(cid: int, body: TagIn, db: Session = Depends(get_db), me: User = Depends
 
 @router.get("/customers/{cid}/open-orders")
 def open_orders(cid: int, db: Session = Depends(get_db), me: User = Depends(current_user)):
+    """What a payment can be allocated to: unpaid invoices first (oldest first), then orders not yet invoiced (advances)."""
     c = get_or_404(db, Customer, cid, "customer")
-    rows = db.scalars(select(SalesDoc).where(SalesDoc.customer_id == c.id, SalesDoc.kind == "order",
-                                             SalesDoc.status.in_(["submitted", "approved"])).order_by(SalesDoc.doc_date, SalesDoc.id))
+    rows = db.scalars(select(SalesDoc).where(SalesDoc.customer_id == c.id, or_(and_(SalesDoc.kind == "inv", SalesDoc.status == "open"),
+                                             and_(SalesDoc.kind == "order", SalesDoc.status.in_(["submitted", "approved"]))))
+                      .order_by(SalesDoc.doc_date, SalesDoc.id))
     out = []
     for o in rows:
-        due = round(float(o.total) - order_paid(db, o.id), 2)
-        if due > 0:
-            out.append({"id": o.id, "no": o.no, "date": o.doc_date.isoformat(), "total": f(o.total), "due": due})
+        due = doc_due(db, o)
+        if due > 0.004:
+            out.append({"id": o.id, "no": o.no, "kind": o.kind, "date": o.doc_date.isoformat(), "total": f(o.total), "due": due,
+                        "due_date": o.valid_to.isoformat() if o.kind == "inv" and o.valid_to else None,
+                        "pay": pay_status(db, o) if o.kind == "inv" else None})
+    out.sort(key=lambda x: (x["kind"] != "inv", x["date"]))
     return {"customer": cust_out(db, c), "orders": out}
 
 

@@ -7,16 +7,21 @@ import { useSession } from '../session'
 import { Modal, useLoad, useUi } from '../ui'
 
 const OSTAT = { draft: ['Draft', ''], submitted: ['Waiting for approval', 'warn'], approved: ['Approved', 'ok'], cancelled: ['Cancelled', 'bad'],
-  open: ['Open', 'info'], converted: ['Converted to order', 'ok'], expired: ['Expired', 'warn'] }
-const K = { quote: { one: 'quotation', list: '#/quotes', title: 'Quotations' }, order: { one: 'sales order', list: '#/orders', title: 'Sales orders' } }
+  open: ['Open', 'info'], converted: ['Converted to order', 'ok'], expired: ['Expired', 'warn'],
+  unpaid: ['Unpaid', 'warn'], partly: ['Partly paid', 'info'], paid: ['Paid', 'ok'], overdue: ['Overdue', 'bad'],
+  partial: ['Partly invoiced', 'info'], full: ['Invoiced', 'ok'] }
+const K = { quote: { one: 'quotation', list: '#/quotes', title: 'Quotations' }, order: { one: 'sales order', list: '#/orders', title: 'Sales orders' },
+  inv: { one: 'invoice', list: '#/invoices', title: 'Sales invoices' } }
+const INV_FILTER = [['due', 'Payment due'], ['unpaid', 'Unpaid'], ['partly', 'Partly paid'], ['overdue', 'Overdue'], ['paid', 'Paid'], ['cancelled', 'Cancelled']]
 export const Status = ({ s }) => <span className={`badge ${(OSTAT[s] || ['', ''])[1]}`}>{(OSTAT[s] || [s])[0]}</span>
 export const Sync = ({ x }) => <><span className={`badge ${SYNC[x.status][1]}`} title={x.error || ''}>{SYNC[x.status][0]}</span>{x.no && <div className="fine mono">{x.no}</div>}</>
 
 export function DocList({ kind, route }) {
   const { isMgr, settings } = useSession(); const { toast } = useUi()
-  const q = route.q, st = q.get('status') || '', sy = q.get('sync') || '', from = q.get('from') || '', to = q.get('to') || ''
-  const [rows] = useLoad(() => api(`/api/docs?kind=${kind}&status=${st}&sync=${sy}&date_from=${from}&date_to=${to}`), [kind, st, sy, from, to])
-  const [view, setView] = useState(null)
+  const q = route.q, st = q.get('status') || '', sy = q.get('sync') || '', from = q.get('from') || '', to = q.get('to') || '', pay = q.get('pay') || ''
+  const [rows] = useLoad(() => api(`/api/docs?kind=${kind}&status=${st}&sync=${sy}&date_from=${from}&date_to=${to}&pay=${pay}`), [kind, st, sy, from, to, pay])
+  const [view, setView] = useState(+q.get('view') || null)
+  if (kind === 'inv') return <InvoiceList rows={rows} q={q} view={view} setView={setView} />
   const setQ = (k, v) => { const p = new URLSearchParams(q); v ? p.set(k, v) : p.delete(k); go(`${K[kind].list}?${p}`) }
   const statuses = kind === 'quote' ? ['draft', 'open', 'converted', 'expired', 'cancelled'] : ['draft', 'submitted', 'approved', 'cancelled']
   return (<div className="card"><div className="hd"><div><h2>{K[kind].title}</h2><p className="sub">{kind === 'quote'
@@ -29,11 +34,58 @@ export function DocList({ kind, route }) {
       <a className="btn pri" href={`#/${kind}/new`}>New {K[kind].one}</a></div></div>
     {!rows ? <div className="loading">Loading…</div> : rows.length ? <div className="scroll"><table className="t"><thead><tr><th>No.</th><th>Date</th>{kind === 'quote' && <th>Valid until</th>}<th>Customer</th><th>Sales staff</th><th className="r">Lines</th><th className="r">Total</th><th>Status</th><th>Dynamics</th></tr></thead><tbody>
       {rows.map((d) => <tr key={d.id} className="click" onClick={() => setView(d.id)}><td className="mono"><b>{d.no}</b></td><td>{dmy(d.date)}</td>{kind === 'quote' && <td>{dmy(d.valid_to)}</td>}
-        <td>{d.customer}<div className="fine">{d.customer_code}</div></td><td>{d.rep}</td><td className="r">{d.lines_count}</td><td className="r"><b>{inr(d.total)}</b></td><td><Status s={d.status} /></td><td>{d.status === 'draft' ? '—' : <Sync x={d.sync} />}</td></tr>)}
+        <td>{d.customer}<div className="fine">{d.customer_code}</div></td><td>{d.rep}</td><td className="r">{d.lines_count}</td><td className="r"><b>{inr(d.total)}</b></td><td><Status s={d.status} />{d.invoiced && <> <Status s={d.invoiced} /></>}</td><td>{d.status === 'draft' ? '—' : <Sync x={d.sync} />}</td></tr>)}
     </tbody><tfoot><tr><td colSpan={kind === 'quote' ? 6 : 5}>{rows.length} documents</td><td className="r">{inr(rows.filter((d) => d.status !== 'cancelled').reduce((s, d) => s + d.total, 0))}</td><td colSpan={2} /></tr></tfoot></table></div>
       : <div className="empty">Nothing yet.</div>}
     <DocView id={view} onClose={() => setView(null)} />
   </div>)
+}
+
+function InvoiceList({ rows, q, view, setView }) {
+  const { isMgr } = useSession(); const { toast } = useUi()
+  const pay = q.get('pay') || (q.get('status') === 'cancelled' ? 'cancelled' : ''), from = q.get('from') || '', to = q.get('to') || ''
+  const setQ = (patch) => { const p = new URLSearchParams(q); Object.entries(patch).forEach(([k, v]) => (v ? p.set(k, v) : p.delete(k))); p.delete('view'); go(`#/invoices?${p}`) }
+  const live = (rows || []).filter((d) => d.status !== 'cancelled')
+  return (<div className="card"><div className="hd"><div><h2>Sales invoices</h2><p className="sub">Invoices are made from approved sales orders (open the order and choose <b>Create invoice</b>). Payments are received against them.</p></div>
+    <div className="tools"><select className="inp" value={pay} onChange={(e) => setQ(e.target.value === 'cancelled' ? { status: 'cancelled', pay: '' } : { pay: e.target.value, status: '' })} aria-label="Payment">
+      <option value="">All invoices</option>{INV_FILTER.map(([k, v]) => <option key={k} value={k}>{v}</option>)}</select>
+      <input type="date" className="inp" value={from} onChange={(e) => setQ({ from: e.target.value })} aria-label="From" /><input type="date" className="inp" value={to} onChange={(e) => setQ({ to: e.target.value })} aria-label="To" />
+      {isMgr && <button className="btn" onClick={() => download('/api/docs-export?kind=inv', 'Sales_invoices.xlsx').catch((e) => toast(e.message))}>Download Excel</button>}
+      <a className="btn" href="#/orders?status=approved">Approved orders</a></div></div>
+    {!rows ? <div className="loading">Loading…</div> : rows.length ? <div className="scroll"><table className="t"><thead><tr><th>Invoice</th><th>Date</th><th>Due date</th><th>Customer</th><th>Order</th><th className="r">Total</th><th className="r">Paid</th><th className="r">Due</th><th>Status</th><th>Dynamics</th></tr></thead><tbody>
+      {rows.map((d) => <tr key={d.id} className="click" onClick={() => setView(d.id)}><td className="mono"><b>{d.no}</b></td><td>{dmy(d.date)}</td><td>{dmy(d.due_date)}</td>
+        <td>{d.customer}<div className="fine">{d.customer_code}</div></td><td className="mono">{d.order_no || ''}</td><td className="r"><b>{inr(d.total)}</b></td>
+        <td className="r">{d.paid ? inr(d.paid) : ''}</td><td className="r">{d.due ? <b>{inr(d.due)}</b> : ''}</td><td><Status s={d.pay} /></td><td>{d.sync.status === 'na' ? '—' : <Sync x={d.sync} />}</td></tr>)}</tbody>
+      <tfoot><tr><td colSpan={5}>{live.length} invoices</td><td className="r">{inr(live.reduce((s, d) => s + d.total, 0))}</td><td className="r">{inr(live.reduce((s, d) => s + (d.paid || 0), 0))}</td>
+        <td className="r">{inr(live.reduce((s, d) => s + (d.due || 0), 0))}</td><td colSpan={2} /></tr></tfoot></table></div> : <div className="empty">No invoices yet.</div>}
+    <DocView id={view} onClose={() => setView(null)} /></div>)
+}
+
+function InvoiceDialog({ d, onClose, onDone }) {
+  const { toast } = useUi()
+  const [f, setF] = useState({ date: todayISO(), due_date: '', remarks: '' })
+  const [qty, setQty] = useState(() => Object.fromEntries(d.lines.filter((l) => l.to_invoice > 0).map((l) => [l.line_id, l.to_invoice])))
+  const [busy, setBusy] = useState(false)
+  const lines = d.lines.filter((l) => l.to_invoice > 0)
+  const est = lines.reduce((s, l) => s + (l.taxable / l.qty) * (+qty[l.line_id] || 0) * (1 + l.gst_rate / 100), 0)
+  const save = async () => {
+    setBusy(true)
+    try {
+      const inv = await api(`/api/docs/${d.id}/invoice`, { method: 'POST', body: { date: f.date, due_date: f.due_date || null, remarks: f.remarks,
+        lines: lines.map((l) => ({ line_id: l.line_id, qty: +qty[l.line_id] || 0 })).filter((x) => x.qty > 0) } })
+      toast(`Invoice ${inv.no} made for ${inr(inv.total)}${inv.paid ? `; ${inr(inv.paid)} advance applied` : ''}`); onDone(inv)
+    } catch (e) { toast(e.message); setBusy(false) }
+  }
+  return <Modal open onClose={onClose} wide><div className="dlg"><h2>Create invoice · order {d.no}</h2>
+    <p className="fine" style={{ marginTop: 0 }}>{d.customer}. Prices, discounts and GST are the order's. Invoice everything, or less of a line to bill the rest later.</p>
+    <div className="form"><label className="field">Invoice date<input type="date" className="inp" value={f.date} max={todayISO()} onChange={(e) => setF({ ...f, date: e.target.value })} /></label>
+      <label className="field">Due date<input type="date" className="inp" value={f.due_date} onChange={(e) => setF({ ...f, due_date: e.target.value })} /><span className="fine">Empty: from the payment terms ({d.customer_detail.terms || 'cash'})</span></label>
+      <label className="field wide">Remarks<input className="inp" value={f.remarks} placeholder={d.remarks} onChange={(e) => setF({ ...f, remarks: e.target.value })} /></label></div>
+    <div className="scroll"><table className="t"><thead><tr><th>Material</th><th className="r">Ordered</th><th className="r">Invoiced</th><th className="r" style={{ width: 140 }}>Invoice now</th></tr></thead><tbody>
+      {lines.map((l) => <tr key={l.line_id}><td><b>{l.material}</b> {l.name}</td><td className="r">{num(l.qty)} {l.uom}</td><td className="r">{l.invoiced ? num(l.invoiced) : ''}</td>
+        <td><input className="inp inv-qty" style={{ textAlign: 'right', width: '100%' }} inputMode="decimal" value={qty[l.line_id] ?? ''} onChange={(e) => setQty({ ...qty, [l.line_id]: e.target.value })} /><div className="fine r">of {num(l.to_invoice)} left</div></td></tr>)}</tbody></table></div>
+    <p className="fine">About {inr0(est)} before order charges and rounding; the server works out the exact amount.{d.paid ? ` Advances of ${inr0(d.paid)} on this order will be applied.` : ''}</p>
+    <div className="btns"><button className="btn ghost" onClick={onClose}>Cancel</button><button className="btn pri" disabled={busy || !lines.some((l) => +qty[l.line_id] > 0)} onClick={save}>Create invoice</button></div></div></Modal>
 }
 
 export function TotalsTable({ t }) {
@@ -51,26 +103,40 @@ export function TotalsTable({ t }) {
 function DocView({ id, onClose }) {
   const { settings } = useSession(); const { toast, confirm } = useUi()
   const [d, reload] = useLoad(() => (id ? api(`/api/docs/${id}`) : Promise.resolve(null)), [id])
+  const [invoicing, setInvoicing] = useState(false)
   if (!id) return <Modal open={false} />
+  if (invoicing && d) return <InvoiceDialog d={d} onClose={() => setInvoicing(false)} onDone={(inv) => { setInvoicing(false); onClose(); go(`#/invoices?view=${inv.id}`) }} />
+  const inv = d?.kind === 'inv' 
   const act = async (path, msg) => { try { await api(`/api/docs/${id}/${path}`, { method: 'POST' }); toast(msg); onClose(); go(window.location.hash) } catch (e) { toast(e.message) } }
   const print = async () => { if (!(await printSalesDoc(d, settings))) toast('Allow pop-ups to print.') }
   return <Modal open onClose={onClose} wide>{!d ? <div className="loading">Loading…</div> : <div className="dlg">
-    <div className="hd" style={{ margin: 0 }}><div><h2>{d.kind === 'quote' ? 'Quotation' : 'Order'} {d.no} · {d.customer}</h2>
-      <p className="fine" style={{ margin: 0 }}>{dmy(d.date)} · {d.rep}{d.po_ref && ` · ref ${d.po_ref}`}{d.valid_to && ` · valid until ${dmy(d.valid_to)}`}{d.delivery && ` · deliver by ${dmy(d.delivery)}`}</p></div>
-      <Status s={d.status} /> {d.status !== 'draft' && <Sync x={d.sync} />}</div>
+    <div className="hd" style={{ margin: 0 }}><div><h2>{inv ? 'Invoice' : d.kind === 'quote' ? 'Quotation' : 'Order'} {d.no} · {d.customer}</h2>
+      <p className="fine" style={{ margin: 0 }}>{dmy(d.date)} · {d.rep}{d.po_ref && ` · ref ${d.po_ref}`}{inv ? ` · due ${dmy(d.due_date)}` : d.valid_to && ` · valid until ${dmy(d.valid_to)}`}{!inv && d.delivery && ` · deliver by ${dmy(d.delivery)}`}</p></div>
+      {inv ? <><Status s={d.pay} /> {d.sync.status !== 'na' && <Sync x={d.sync} />}</> : <><Status s={d.status} />{d.invoiced && <> <Status s={d.invoiced} /></>} {d.status !== 'draft' && <Sync x={d.sync} />}</>}</div>
+    {inv && d.order_no && <p className="fine" style={{ margin: 0 }}>For order {d.order_no}{d.quote_no && ` (quotation ${d.quote_no})`}</p>}
+    {d.invoices?.length > 0 && <div className="note">Invoices: {d.invoices.map((x, i) => <span key={x.id}>{i ? ', ' : ''}<a href={`#/invoices?view=${x.id}`} onClick={onClose}>{x.no}</a> {inr0(x.total)} ({(OSTAT[x.pay] || [x.pay])[0].toLowerCase()})</span>)}</div>}
     {d.sync.error && <div className="note bad">Dynamics: {d.sync.error}</div>}
-    {d.quote_no && <p className="fine" style={{ margin: 0 }}>From quotation {d.quote_no}</p>}{d.order_no && <div className="note">Converted to order {d.order_no}.</div>}
+    {inv && d.sync.status === 'synced' && <div className="note">Posted in Dynamics as invoice <b>{d.sync.no}</b>.</div>}
+    {inv && d.sync.status === 'pending' && <div className="note">Posting the order in Dynamics… refresh in a moment.</div>}
+    {!inv && d.quote_no && <p className="fine" style={{ margin: 0 }}>From quotation {d.quote_no}</p>}{!inv && d.order_no && <div className="note">Converted to order {d.order_no}.</div>}
     <div className="scroll"><table className="t"><thead><tr><th>Material</th><th>HSN</th><th className="r">Qty</th><th className="r">Price</th><th className="r">Disc %</th><th className="r">Taxable</th><th className="r">GST</th></tr></thead><tbody>
-      {d.lines.map((l, i) => <tr key={i}><td><b>{l.material}</b> {l.name}<div className="fine">{l.price_source}</div></td><td className="mono">{l.hsn}</td><td className="r">{num(l.qty)} {l.uom}</td><td className="r">{inr(l.price)}</td><td className="r">{l.disc || ''}</td><td className="r">{inr(l.taxable)}</td><td className="r">{l.gst_rate}%</td></tr>)}</tbody></table></div>
+      {d.lines.map((l, i) => <tr key={i}><td><b>{l.material}</b> {l.name}<div className="fine">{l.price_source}{l.invoiced ? ` · invoiced ${num(l.invoiced)}` : ''}</div></td><td className="mono">{l.hsn}</td><td className="r">{num(l.qty)} {l.uom}</td><td className="r">{inr(l.price)}</td><td className="r">{l.disc || ''}</td><td className="r">{inr(l.taxable)}</td><td className="r">{l.gst_rate}%</td></tr>)}</tbody></table></div>
     <TotalsTable t={d.totals} />
+    {inv && <div className="scroll"><table className="t" style={{ maxWidth: 520, marginLeft: 'auto' }}><thead><tr><th>Payment received</th><th>Date</th><th>Mode</th><th className="r">Amount</th></tr></thead><tbody>
+      {d.payments.map((p) => <tr key={p.id + '-' + p.amount}><td className="mono"><a href={`#/payments?view=${p.id}`} onClick={onClose}>{p.no}</a></td><td>{dmy(p.date)}</td><td>{p.mode}</td><td className="r">{inr(p.amount)}</td></tr>)}
+      {!d.payments.length && <tr><td colSpan={4} className="mut">No payment yet.</td></tr>}</tbody>
+      <tfoot><tr><td colSpan={3}>Paid {inr(d.paid)}</td><td className="r"><b>Due {inr(d.due)}</b></td></tr></tfoot></table></div>}
     <p className="fine">{d.loc ? <>Recorded {d.distance_m != null ? `${d.distance_m >= 1000 ? (d.distance_m / 1000).toFixed(1) + ' km' : d.distance_m + ' m'} from the customer's visit location` : 'here'}: <LocLink p={d.loc} />
       {d.distance_m != null && d.distance_m > settings.geofence_m && <span className="badge warn"> Away from customer</span>}</> : 'No location recorded.'}{d.kind === 'order' && d.paid ? ` · Paid ${inr0(d.paid)}` : ''}{d.remarks && <><br />Remarks: {d.remarks}</>}</p>
     <div className="btns">
-      {d.can_cancel && <button className="btn danger" onClick={async () => { if (await confirm(`Cancel ${d.no}?`, d.sync.status === 'exported' ? 'It was already sent to Dynamics by file; cancel it there as well.' : 'It will not be sent to Dynamics.', 'Cancel it')) act('cancel', `${d.no} cancelled`) }}>Cancel</button>}
+      {d.can_cancel && <button className="btn danger" onClick={async () => { if (await confirm(`Cancel ${d.no}?`, inv ? 'The order quantities become free to invoice again.' : d.sync.status === 'exported' ? 'It was already sent to Dynamics by file; cancel it there as well.' : 'It will not be sent to Dynamics.', 'Cancel it')) act('cancel', `${d.no} cancelled`) }}>Cancel</button>}
       <button className="btn" onClick={print}>Print</button>
       {d.editable && <a className="btn" href={`#/${d.kind}/${d.id}`} onClick={onClose}>Edit</a>}
       {d.can_approve && <button className="btn ok" onClick={() => act('approve', `${d.no} approved and queued for Dynamics`)}>Approve</button>}
       {d.kind === 'quote' && d.raw_status === 'open' && <a className="btn pri" href={`#/order/new?q=${d.id}`} onClick={onClose}>Convert to order</a>}
+      {d.can_invoice && <button className="btn pri" onClick={() => setInvoicing(true)}>Create invoice</button>}
+      {d.can_post && <button className="btn" onClick={async () => { try { const r = await api(`/api/docs/${id}/post-dynamics`, { method: 'POST' }); toast(r.sync.status === 'synced' ? `Posted in Dynamics as ${r.sync.no}` : `Not posted: ${r.sync.error}`); reload() } catch (e) { toast(e.message) } }}>Post in Dynamics</button>}
+      {inv && d.status === 'open' && d.due > 0 && <a className="btn pri" href={`#/payment/new?c=${d.customer_id}&inv=${d.id}`} onClick={onClose}>Receive payment</a>}
       <button className="btn" onClick={onClose}>Close</button></div></div>}</Modal>
 }
 

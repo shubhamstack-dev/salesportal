@@ -181,6 +181,7 @@ CREATE TABLE IF NOT EXISTS `sales_docs` (
   `lat` decimal(9,6) DEFAULT NULL,
   `lng` decimal(9,6) DEFAULT NULL,
   `quote_id` int DEFAULT NULL,
+  `order_id` int NULL,
   `approved_by` int DEFAULT NULL,
   `approved_at` datetime DEFAULT NULL,
   `created_at` datetime NOT NULL,
@@ -220,6 +221,7 @@ CREATE TABLE IF NOT EXISTS `sales_doc_lines` (
   `gst` decimal(15,2) NOT NULL,
   `price_source` varchar(40) COLLATE utf8mb4_unicode_ci NOT NULL,
   `price_incl` tinyint(1) NULL,
+  `src_line_id` int NULL,
   PRIMARY KEY (`id`),
   KEY `ix_sales_doc_lines_doc_id` (`doc_id`),
   CONSTRAINT `sales_doc_lines_ibfk_1` FOREIGN KEY (`doc_id`) REFERENCES `sales_docs` (`id`) ON DELETE CASCADE

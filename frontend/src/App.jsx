@@ -23,6 +23,7 @@ const NAV = [
   { grp: 'Sales' },
   { id: 'quotes', label: 'Quotations', roles: ALL },
   { id: 'orders', label: 'Sales orders', roles: ALL, badge: 'orders' },
+  { id: 'invoices', label: 'Sales invoices', roles: ALL },
   { id: 'payments', label: 'Payments', roles: ALL },
   { id: 'customers', label: 'Customers', roles: ALL },
   { grp: 'Expenses' },
@@ -163,7 +164,7 @@ function Shell({ me, setMe, onSignOut }) {
   const P = { route }
   const views = {
     dashboard: () => <Dashboard />, myday: () => <MyDay />, timeclock: () => <TimeClock />, attendance: () => <Attendance {...P} />,
-    quotes: () => <DocList kind="quote" {...P} />, orders: () => <DocList kind="order" {...P} />,
+    quotes: () => <DocList key="quote" kind="quote" {...P} />, orders: () => <DocList key="order" kind="order" {...P} />, invoices: () => <DocList key={`inv${P.route.q.get("view") || ""}`} kind="inv" {...P} />,
     quote: () => <DocEditor kind="quote" {...P} />, order: () => <DocEditor kind="order" {...P} />,
     payments: () => <PaymentList {...P} />, payment: () => <PaymentForm {...P} />, customers: () => <Customers {...P} />,
     expenses: () => <ExpenseList {...P} />, expense: () => <ExpenseForm {...P} />, grades: () => <Grades />,

@@ -414,10 +414,10 @@ def api_url(s: dict, path: str) -> str:
     return f"{base}/{path.lstrip('/')}" if path.strip("/") else base
 
 
-def api_call(s: dict, token: str, path: str, method="GET", body=None) -> dict:
+def api_call(s: dict, token: str, path: str, method="GET", body=None, headers: dict | None = None) -> dict:
     try:
-        r = httpx.request(method, api_url(s, path), json=body, timeout=60,
-                          headers={"Authorization": f"Bearer {token}", "Accept": "application/json"})
+        r = httpx.request(method, api_url(s, path), json=body, timeout=120,
+                          headers={"Authorization": f"Bearer {token}", "Accept": "application/json", **(headers or {})})
     except httpx.HTTPError as e:
         raise HTTPException(502, f"Could not reach Dynamics: {e}")
     data = r.json() if r.content and "json" in r.headers.get("content-type", "") else {}
@@ -702,3 +702,82 @@ def apply_packs(db: Session, s: dict, token: str | None = None, cache: dict | No
     for mat in db.scalars(select(Material)):
         mat.pack_qty = found.get(mat.code, 0)
     return {"items": len(found)}
+
+
+# ------------------------------------------------------------------ invoicing: post the Business Central sales order
+class PostError(Exception):
+    pass
+
+
+def _q(v: str) -> str:
+    return quote(v.replace("'", "''"), safe="")
+
+
+def post_invoice_in_bc(db: Session, s: dict, token: str, inv: SalesDoc) -> str:
+    """For an invoice made here, posts its sales order in Business Central (Ship and Invoice) for exactly the invoiced
+    quantities, and returns the number of the posted sales invoice Business Central made.
+
+    1. find the Business Central order by the number it got when it was sent (salesOrders?$filter=number eq ...)
+    2. on each of its item lines set Qty. to Ship and Qty. to Invoice: this invoice's quantity, 0 for the rest
+    3. Microsoft.NAV.shipAndInvoice
+    4. read the posted invoice: salesInvoices?$filter=orderNumber eq ..., the newest one not already on another invoice here"""
+    from ..models import SalesDoc as SD
+    order = db.get(SD, inv.order_id) if inv.order_id else None
+    if not order:
+        raise PostError("This invoice has no sales order.")
+    if order.sync_status != "synced" or not order.sync_no:
+        raise PostError(f"Order {order.no} is not in Dynamics yet. Send it (Dynamics sync, Send via API), then Post in Dynamics.")
+    ep = s["dynamics"]["ep"].get("orders") or "salesOrders"
+    base = endpoint_url(s, token, ep)
+    found = api_call(s, token, f"{base}?$filter=number eq '{_q(order.sync_no)}'").get("value") or []
+    if not found:
+        raise PostError(f"Dynamics has no open sales order {order.sync_no}; it may already be fully invoiced or deleted there.")
+    bc_id = found[0]["id"]
+    bc_lines = [x for x in api_call(s, token, f"{base}({bc_id})/salesOrderLines").get("value", []) if x.get("lineType") == "Item"]
+    want = {l.src_line_id: float(l.qty) for l in inv.lines}
+    if len(bc_lines) != len(order.lines):
+        raise PostError(f"Dynamics order {order.sync_no} has {len(bc_lines)} item lines, the portal order {len(order.lines)}; it was changed in Dynamics.")
+    plan = []
+    for ol, bl in zip(order.lines, bc_lines):
+        if (bl.get("lineObjectNumber") or "").strip().upper() != ol.material_code.strip().upper():
+            raise PostError(f"Line {ol.line_no}: Dynamics has {bl.get('lineObjectNumber')}, the portal {ol.material_code}.")
+        q = round(want.get(ol.id, 0.0), 5)
+        left = float(bl.get("quantity") or 0) - float(bl.get("invoicedQuantity") or 0)
+        if q > left + 0.00001:
+            raise PostError(f"{ol.material_code}: Dynamics has only {left:g} left to invoice on {order.sync_no}, the invoice has {q:g}.")
+        plan.append((bl, q))
+    for bl, q in plan:
+        api_call(s, token, f"{base}({bc_id})/salesOrderLines({bl['id']})", "PATCH",
+                 {"shipQuantity": q, "invoiceQuantity": q}, headers={"If-Match": bl.get("@odata.etag") or "*"})
+    api_call(s, token, f"{base}({bc_id})/Microsoft.NAV.shipAndInvoice", "POST")
+    inv_ep = s["dynamics"]["ep"].get("invoices") or "salesInvoices"
+    posted = api_call(s, token, f"{endpoint_url(s, token, inv_ep)}?$filter=orderNumber eq '{_q(order.sync_no)}'").get("value") or []
+    taken = {x.sync_no for x in db.scalars(select(SD).where(SD.kind == "inv", SD.order_id == order.id, SD.id != inv.id)) if x.sync_no}
+    fresh = [x for x in posted if x.get("number") and x["number"] not in taken]
+    if not fresh:
+        raise PostError(f"Order {order.sync_no} was posted in Dynamics, but its posted invoice was not found. Check Posted Sales Invoices there.")
+    fresh.sort(key=lambda x: (x.get("postingDate") or x.get("invoiceDate") or "", x.get("lastModifiedDateTime") or "", x["number"]))
+    return fresh[-1]["number"]
+
+
+def post_invoice(doc_id: int) -> None:
+    """Background job after an invoice is made (and the Post in Dynamics button). Never raises: a failure is kept on the
+    invoice as "Sync error" with the reason, and can be retried."""
+    from ..db import SessionLocal
+    from ..models import SyncLog
+    with SessionLocal() as db:
+        inv = db.get(SalesDoc, doc_id)
+        if not inv or inv.kind != "inv" or inv.status != "open" or inv.sync_status not in ("pending", "error"):
+            return
+        s = get_settings(db)
+        try:
+            no = post_invoice_in_bc(db, s, access_token(s), inv)
+            inv.sync_status, inv.sync_no, inv.sync_error, inv.sync_at = "synced", no[:40], None, now_utc()
+            db.add(SyncLog(direction="out", entity="Sales invoice", count=1, status="ok", message=f"{inv.no}: order posted in Dynamics, invoice {no}"))
+        except (PostError, HTTPException) as e:
+            msg = str(e.detail if isinstance(e, HTTPException) else e)
+            inv.sync_status, inv.sync_error, inv.sync_at = "error", msg[:500], now_utc()
+            db.add(SyncLog(direction="out", entity="Sales invoice", count=0, status="error", message=f"{inv.no}: {msg}"))
+        except Exception as e:  # noqa: BLE001
+            inv.sync_status, inv.sync_error, inv.sync_at = "error", f"Posting failed: {e}"[:500], now_utc()
+        db.commit()

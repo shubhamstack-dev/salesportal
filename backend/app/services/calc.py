@@ -129,14 +129,53 @@ def order_paid(db: Session, order_id: int) -> float:
     return r2(v)
 
 
+def invoices_of(db: Session, order_id: int) -> list[SalesDoc]:
+    return list(db.scalars(select(SalesDoc).where(SalesDoc.kind == "inv", SalesDoc.order_id == order_id, SalesDoc.status != "cancelled")
+                           .order_by(SalesDoc.id)))
+
+
+def invoiced_qty(db: Session, order: SalesDoc) -> dict[int, float]:
+    """Quantity already invoiced per order line (line id -> qty), by invoices that are not cancelled."""
+    out: dict[int, float] = {}
+    for inv in invoices_of(db, order.id):
+        for l in inv.lines:
+            if l.src_line_id:
+                out[l.src_line_id] = round(out.get(l.src_line_id, 0) + float(l.qty), 4)
+    return out
+
+
+def doc_due(db: Session, d: SalesDoc) -> float:
+    """What can still be paid against a document: an invoice's unpaid amount; for an order (advances), the part not
+    invoiced yet, less advances already received on it."""
+    if d.kind == "order":
+        billed = sum(float(i.total) for i in invoices_of(db, d.id))
+        return r2(max(0.0, float(d.total) - billed) - order_paid(db, d.id))
+    return r2(float(d.total) - order_paid(db, d.id))
+
+
+def pay_status(db: Session, inv: SalesDoc) -> str:
+    """unpaid | partly | paid | overdue (unpaid or partly, past its due date) | cancelled"""
+    if inv.status == "cancelled":
+        return "cancelled"
+    paid, total = order_paid(db, inv.id), float(inv.total)
+    if paid >= total - 0.005:
+        return "paid"
+    if inv.valid_to and inv.valid_to < local_today():
+        return "overdue"
+    return "partly" if paid > 0 else "unpaid"
+
+
 def outstanding(db: Session, cust: Customer) -> float:
-    """Dynamics balance at the last download, plus orders placed here since, less payments received since."""
-    orders = db.scalar(select(func.coalesce(func.sum(SalesDoc.total), 0)).where(
-        SalesDoc.customer_id == cust.id, SalesDoc.kind == "order", SalesDoc.status.in_(["submitted", "approved"]),
-        SalesDoc.created_at > cust.balance_at))
+    """Dynamics balance at the last download, plus orders (the part not yet invoiced) and invoices made here since,
+    less payments received since."""
+    docs = db.scalars(select(SalesDoc).where(SalesDoc.customer_id == cust.id, SalesDoc.kind.in_(["order", "inv"]),
+                                             SalesDoc.status.in_(["submitted", "approved", "open"]), SalesDoc.created_at > cust.balance_at))
+    orders = 0.0
+    for d in docs:
+        orders += float(d.total) if d.kind == "inv" else max(0.0, float(d.total) - sum(float(i.total) for i in invoices_of(db, d.id)))
     pays = db.scalar(select(func.coalesce(func.sum(Payment.amount), 0)).where(
         Payment.customer_id == cust.id, Payment.cancelled.is_(False), Payment.created_at > cust.balance_at))
-    return r2(float(cust.balance or 0) + float(orders) - float(pays))
+    return r2(float(cust.balance or 0) + orders - float(pays))
 
 
 # ------------------------------------------------------------------ expenses

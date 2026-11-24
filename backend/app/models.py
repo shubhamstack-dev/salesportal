@@ -177,7 +177,7 @@ class Charge(Base):
 class SalesDoc(SyncMixin, Base):
     __tablename__ = "sales_docs"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    kind: Mapped[str] = mapped_column(String(5), index=True)           # quote | order
+    kind: Mapped[str] = mapped_column(String(5), index=True)           # quote | order | inv (sales invoice)
     no: Mapped[str] = mapped_column(String(30), unique=True)
     customer_id: Mapped[int] = mapped_column(ForeignKey("customers.id"), index=True)
     rep_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
@@ -186,7 +186,8 @@ class SalesDoc(SyncMixin, Base):
     valid_to: Mapped[date | None] = mapped_column(Date, nullable=True)
     po_ref: Mapped[str] = mapped_column(String(60), default="")
     remarks: Mapped[str] = mapped_column(String(500), default="")
-    # quote: draft | open | converted | cancelled ; order: draft | submitted | approved | cancelled
+    # quote: draft | open | converted | cancelled ; order: draft | submitted | approved | cancelled ; inv: open | cancelled
+    # (an invoice's due date is kept in valid_to)
     status: Mapped[str] = mapped_column(String(10), index=True)
     chosen_charges: Mapped[list] = mapped_column(JSON, default=list)
     totals: Mapped[dict] = mapped_column(JSON, default=dict)
@@ -194,6 +195,7 @@ class SalesDoc(SyncMixin, Base):
     lat: Mapped[float | None] = mapped_column(Numeric(9, 6), nullable=True)
     lng: Mapped[float | None] = mapped_column(Numeric(9, 6), nullable=True)
     quote_id: Mapped[int | None] = mapped_column(ForeignKey("sales_docs.id", ondelete="SET NULL"), nullable=True)
+    order_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)   # invoice: the sales order it bills
     approved_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     approved_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
@@ -220,6 +222,7 @@ class SalesDocLine(Base):
     gst: Mapped[Decimal] = mapped_column(Money)
     price_source: Mapped[str] = mapped_column(String(40), default="")
     price_incl: Mapped[bool | None] = mapped_column(Boolean, nullable=True)   # price includes GST (Business Central "Price Inclusive of Tax")
+    src_line_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)  # invoice line: the order line it bills
 
 
 # ------------------------------------------------------------------ payments
@@ -247,7 +250,7 @@ class PaymentAllocation(Base):
     __tablename__ = "payment_allocations"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     payment_id: Mapped[int] = mapped_column(ForeignKey("payments.id", ondelete="CASCADE"), index=True)
-    order_id: Mapped[int] = mapped_column(ForeignKey("sales_docs.id"), index=True)
+    order_id: Mapped[int] = mapped_column(ForeignKey("sales_docs.id"), index=True)   # the invoice (or, for an advance, the order) paid
     amount: Mapped[Decimal] = mapped_column(Money)
 
 

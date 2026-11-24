@@ -23,8 +23,8 @@ export default function Settings() {
         domains: f.ms_domains.trim().toLowerCase(), auto_register: !!f.ms_auto },
       print: { bank_name: f.bank_name.trim(), account_name: f.account_name.trim(), account_no: f.account_no.trim(), branch: f.branch.trim(),
         ifsc: f.ifsc.trim().toUpperCase(), upi_id: f.upi_id.trim(), jurisdiction: f.jurisdiction.trim(), terms: f.terms,
-        quote_declaration: f.quote_declaration.trim(), order_declaration: f.order_declaration.trim() },
-      prefixes: { order: f.p_order, quote: f.p_quote, payment: f.p_payment, expense: f.p_expense }, quote_days: +f.quote_days || 15,
+        quote_declaration: f.quote_declaration.trim(), order_declaration: f.order_declaration.trim(), invoice_declaration: f.invoice_declaration.trim() },
+      prefixes: { order: f.p_order, quote: f.p_quote, invoice: f.p_invoice, payment: f.p_payment, expense: f.p_expense }, quote_days: +f.quote_days || 15,
       allow_register: !!f.allow_register, need_approval: !!f.need_approval, mrp_incl_gst: !!f.mrp_incl_gst, incl_gst_groups: f.incl_gst_groups.trim().toUpperCase(), credit_check: f.credit_check, price_override: !!f.price_override, round_off: !!f.round_off,
       shift_start: f.shift_start, grace_min: +f.grace_min || 0, full_day_hrs: +f.full_day_hrs || 8, half_day_hrs: +f.half_day_hrs || 4, punch_needs_location: !!f.punch_needs_location,
       maps_key: f.maps_key.trim(), geofence_m: +f.geofence_m || 300 }
@@ -64,9 +64,10 @@ export default function Settings() {
       <label className="field">Jurisdiction<input className="inp" name="jurisdiction" defaultValue={p.jurisdiction} /></label>
       <label className="field wide">Quotation declaration<input className="inp" name="quote_declaration" defaultValue={p.quote_declaration} /></label>
       <label className="field wide">Sales order declaration<input className="inp" name="order_declaration" defaultValue={p.order_declaration} /></label>
+      <label className="field wide">Invoice declaration<input className="inp" name="invoice_declaration" defaultValue={p.invoice_declaration} /></label>
       <label className="field wide">Terms &amp; conditions (one per line; the text before the first colon is printed bold; {'{jurisdiction}'} is replaced)<textarea className="inp" name="terms" rows={8} defaultValue={p.terms} /></label></div></div>
     <div className="card"><h2>Quotations, orders and payments</h2><div className="form">
-      {['order', 'quote', 'payment', 'expense'].map((k) => <label key={k} className="field">{k[0].toUpperCase() + k.slice(1)} number prefix<input className="inp" name={'p_' + k} defaultValue={s.prefixes[k]} /></label>)}
+      {['order', 'quote', 'invoice', 'payment', 'expense'].map((k) => <label key={k} className="field">{k[0].toUpperCase() + k.slice(1)} number prefix<input className="inp" name={'p_' + k} defaultValue={s.prefixes[k]} /></label>)}
       <label className="field">Quotations valid for (days)<input className="inp" name="quote_days" defaultValue={s.quote_days} /></label>
       <label className="field">Credit limit check<select className="inp" name="credit_check" defaultValue={s.credit_check}><option value="warn">Warn</option><option value="block">Block orders over the limit</option><option value="off">Off</option></select></label>
       <label className="chk wide"><input type="checkbox" name="allow_register" defaultChecked={s.allow_register ?? true} /> <span><b>Show the Register button</b> on the sign-in page, so new staff can ask for an account (an administrator approves it). Untick to hide it: only administrators add people.</span></label>

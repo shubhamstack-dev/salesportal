@@ -129,8 +129,8 @@ export async function printSalesDoc(d, settings) {
   if (!w) return false
   w.document.write('<p style="font:14px sans-serif;padding:20px">Preparing the print…</p>')
   const co = settings.company || {}, pr = settings.print || {}, c = d.customer_detail, t = d.totals
-  const quote = d.kind === 'quote'
-  const title = quote ? 'QUOTATION' : 'SALES ORDER'
+  const quote = d.kind === 'quote', inv = d.kind === 'inv'
+  const title = quote ? 'QUOTATION' : inv ? 'TAX INVOICE' : 'SALES ORDER'
   const coName = co.legal_name || co.name
 
   // Lines worked out as the Business Central report (SF Sales Invoice GST, CalcLineValues) does:
@@ -184,6 +184,9 @@ export async function printSalesDoc(d, settings) {
   const pairs = quote
     ? [['Quotation No.', d.no, 'Dated', longDate(d.date), 1], ['Valid Until', longDate(d.valid_to), 'Customer No.', c.code],
       ['Terms', c.terms, 'Your Ref.', d.po_ref], ['Salesperson', d.rep, 'Dynamics No.', d.sync?.no]]
+    : inv ? [['Invoice No.', d.no, 'Dated', longDate(d.date), 1], ['Order No.', d.order_no, 'Due Date', longDate(d.due_date), 1],
+      ['Quotation No.', d.quote_no, 'Buyer Ref.', d.po_ref], ['Terms', c.terms, 'Dynamics Inv.', d.sync?.status === 'synced' ? d.sync.no : ''],
+      ['Salesperson', d.rep, '', '']]
     : [['Order No.', d.no, 'Dated', longDate(d.date), 1], ['Quotation No.', d.quote_no, 'Delivery Date', longDate(d.delivery)],
       ['Terms', c.terms, 'Buyer Ref.', d.po_ref], ['Salesperson', d.rep, 'Dynamics No.', d.sync?.no]]
   pairs.splice(pairs.length - 1, 0, ['Price Group', c.price_group || 'MRP', 'Customer No.', quote ? '' : c.code])
@@ -198,21 +201,23 @@ export async function printSalesDoc(d, settings) {
     : `<div class="boxes"><div><div class="bh">Consignee (Ship to)</div><div class="bb">${ship}</div></div><div><div class="bh">Buyer (Bill to)</div><div class="bb">${bill}</div></div></div>`
   const sign = `<div class="sig"><div class="for">for</div><div class="nm">${esc(coName.toUpperCase())}</div><div class="line">______________________________</div><div class="as">Authorised Signatory</div></div>`
 
-  const qr = await upiQr(pr.upi_id, coName, t.total, d.no)
+  const payable = inv && d.due != null ? d.due : t.total      // an invoice's QR asks for what is still due
+  const qr = payable > 0 ? await upiQr(pr.upi_id, coName, payable, d.no) : ''
+  const paidNote = inv && d.paid ? `<div class="hint">Received ₹ ${n2(d.paid)} · Balance due ₹ ${n2(d.due)}</div>` : ''
   const bank = `<div class="pay"><div><div class="t">Bank Details</div>${kv([['Bank', pr.bank_name], ['A/c Name', pr.account_name], ['A/c No.', pr.account_no, 1],
     ['Branch', pr.branch], ['IFSC', pr.ifsc], ['UPI ID', pr.upi_id, 1]])}</div>
-    <div><div class="t">${quote ? 'Scan to Pay (Advance)' : 'Scan to Pay'}</div>${qr || '<div class="hint">Add a UPI ID under Settings to print a payment QR code.</div>'}
+    <div><div class="t">${quote ? 'Scan to Pay (Advance)' : 'Scan to Pay'}</div>${paidNote}${qr || (payable > 0 ? '<div class="hint">Add a UPI ID under Settings to print a payment QR code.</div>' : '<div class="hint">Fully paid. Thank you.</div>')}
     ${qr ? '<div class="hint">Kisi bhi UPI app se scan karein</div>' : ''}</div></div>`
 
   const page1 = `<div class="page"><div class="mast"><div class="kind">${title}</div><h1>${title}</h1>
     <img class="logo" src="${location.origin}/logo.png" alt=""></div><hr class="subrule">
     <div class="top">${coBlock}${grid}</div>${boxes}${items}${sum}${words}</div>`
-  const page2 = `<div class="page brk"><div class="decl"><div class="d"><b>Declaration</b>${esc(quote ? pr.quote_declaration : pr.order_declaration)}</div>${sign}</div>
+  const page2 = `<div class="page brk"><div class="decl"><div class="d"><b>Declaration</b>${esc(quote ? pr.quote_declaration : inv ? pr.invoice_declaration : pr.order_declaration)}</div>${sign}</div>
     <h2>TERMS &amp; CONDITIONS</h2><hr class="rule"><ul class="tc">${terms(pr.terms, pr.jurisdiction)}</ul><div class="eoe">E. &amp; O.E.</div>
-    ${bank}<div class="foot"><div class="l">This is a computer generated ${quote ? 'quotation' : 'sales order'}.</div>${sign}</div></div>`
+    ${bank}<div class="foot"><div class="l">This is a computer generated ${quote ? 'quotation' : inv ? 'invoice' : 'sales order'}.</div>${sign}</div></div>`
 
   w.document.open()
-  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${quote ? 'Quotation' : 'Sales order'} ${esc(d.no)}</title><style>${CSS}</style></head>
+  w.document.write(`<!doctype html><html><head><meta charset="utf-8"><title>${quote ? 'Quotation' : inv ? 'Invoice' : 'Sales order'} ${esc(d.no)}</title><style>${CSS}</style></head>
     <body>${page1}${page2}<script>onload=()=>setTimeout(()=>print(),150)<\/script></body></html>`)
   w.document.close()
   return true

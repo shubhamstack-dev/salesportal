@@ -257,3 +257,62 @@ def test_register_can_be_turned_off(c, admin):
     assert r.status_code == 403 and "turned off" in r.json()["detail"]
     c.put("/api/settings", json={"allow_register": True}, headers=H(admin))
     assert c.post("/api/auth/register", json={"name": "On", "username": "on.user", "password": "on123456"}).status_code == 200
+
+
+def test_order_to_invoices_and_payments(c, rep, admin):
+    """The order from the quotation above (30 cases, 2% freight, 18% GST, total 19,679) with a 5,000 advance:
+    invoiced in two parts; the advance moves to the first invoice; payments are received against invoices."""
+    awadh = cust_id(c, admin, "C1001")
+    o = next(d for d in c.get("/api/docs?kind=order", headers=H(admin)).json() if d["customer_id"] == awadh and d["status"] == "approved")
+    od = c.get(f"/api/docs/{o['id']}", headers=H(admin)).json()
+    assert od["can_invoice"] and od["lines"][0]["to_invoice"] == 30 and od["paid"] == 5000
+    line = od["lines"][0]["line_id"]
+    assert c.post(f"/api/docs/{o['id']}/invoice", json={}, headers=H(rep)).status_code == 403          # sales staff do not invoice
+    r = c.post(f"/api/docs/{o['id']}/invoice", json={"lines": [{"line_id": line, "qty": 31}]}, headers=H(admin))
+    assert r.status_code == 422 and "only 30" in r.json()["detail"]
+
+    # part 1: 10 cases -> 5,450 + 109 freight + 1,000.62 GST = 6,559.62 -> 6,560
+    i1 = c.post(f"/api/docs/{o['id']}/invoice", json={"lines": [{"line_id": line, "qty": 10}]}, headers=H(admin)).json()
+    assert i1["kind"] == "inv" and i1["no"].startswith("SI") and i1["order_no"] == o["no"] and i1["quote_no"].startswith("QT")
+    t = i1["totals"]
+    assert t["taxable"] == 5559 and t["cgst"] == 500.31 and t["total"] == 6560
+    assert i1["lines"][0]["price"] == 545 and i1["lines"][0]["qty"] == 10
+    assert i1["paid"] == 5000 and i1["due"] == 1560 and i1["pay"] == "partly"                      # the advance moved over
+    assert i1["due_date"] >= i1["date"] and i1["sync"]["status"] == "na"
+    od = c.get(f"/api/docs/{o['id']}", headers=H(admin)).json()
+    assert od["invoiced"] == "partial" and od["lines"][0]["to_invoice"] == 20 and od["paid"] == 0 and not od["can_cancel"]
+    assert c.post(f"/api/docs/{o['id']}/cancel", headers=H(admin)).status_code == 409
+
+    # part 2: the rest; the two invoices add up to the order exactly
+    i2 = c.post(f"/api/docs/{o['id']}/invoice", json={}, headers=H(admin)).json()
+    assert i2["lines"][0]["qty"] == 20 and i2["total"] == 13119 and i1["total"] + i2["total"] == 19679
+    od = c.get(f"/api/docs/{o['id']}", headers=H(admin)).json()
+    assert od["invoiced"] == "full" and not od["can_invoice"] and [i["no"] for i in od["invoices"]] == [i1["no"], i2["no"]]
+    assert c.post(f"/api/docs/{o['id']}/invoice", json={}, headers=H(admin)).status_code == 422
+
+    # the sales rep sees the invoices of their order
+    assert c.get(f"/api/docs/{i1['id']}", headers=H(rep)).status_code == 200
+    assert not c.get(f"/api/docs/{i1['id']}", headers=H(rep)).json()["can_cancel"]
+
+    # receive payment: open invoices are offered first; the fully invoiced order is not
+    oo = c.get(f"/api/customers/{awadh}/open-orders", headers=H(rep)).json()["orders"]
+    assert [(x["no"], x["kind"], x["due"]) for x in oo[:2]] == [(i1["no"], "inv", 1560), (i2["no"], "inv", 13119)]
+    assert o["id"] not in [x["id"] for x in oo]
+    body = {"customer_id": awadh, "date": local_today().isoformat(), "amount": 14679, "mode": "neft", "ref": "UTR2", **LOC,
+            "allocations": [{"order_id": i1["id"], "amount": 1560}, {"order_id": i2["id"], "amount": 13119}]}
+    bad = c.post("/api/payments", json={**body, "allocations": [{"order_id": i1["id"], "amount": 2000}]}, headers=H(rep))
+    assert bad.status_code == 422 and "1,560.00 due" in bad.json()["detail"]
+    p = c.post("/api/payments", json=body, headers=H(rep)).json()
+    assert {a["kind"] for a in p["allocations"]} == {"inv"}
+    g1 = c.get(f"/api/docs/{i1['id']}", headers=H(admin)).json()
+    assert g1["pay"] == "paid" and g1["due"] == 0 and len(g1["payments"]) == 2                     # the advance and this receipt
+    assert [d["no"] for d in c.get("/api/docs?kind=inv&pay=due", headers=H(admin)).json()] == []
+    assert len(c.get("/api/docs?kind=inv&pay=paid", headers=H(admin)).json()) == 2
+
+    # an invoice with money on it cannot be cancelled; cancel the receipt first
+    assert c.post(f"/api/docs/{i2['id']}/cancel", headers=H(admin)).status_code == 409
+    assert c.post(f"/api/payments/{p['id']}/cancel", headers=H(admin)).status_code == 200
+    assert c.post(f"/api/docs/{i2['id']}/cancel", headers=H(rep)).status_code == 403
+    assert c.post(f"/api/docs/{i2['id']}/cancel", headers=H(admin)).json()["status"] == "cancelled"
+    od = c.get(f"/api/docs/{o['id']}", headers=H(admin)).json()
+    assert od["invoiced"] == "partial" and od["lines"][0]["to_invoice"] == 20 and od["can_invoice"]     # free to invoice again

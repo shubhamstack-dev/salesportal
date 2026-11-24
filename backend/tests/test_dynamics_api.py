@@ -95,7 +95,57 @@ def bc_create(kind, body):
             return _json(400, {"error": {"message": f"Bad line {ln}"}})
     no = ("SQ" if kind == "quote" else "SO") + str(1001 + len(BC_DOCS))
     BC_DOCS.append({"kind": kind, "number": no, **body})
+    if kind == "order":
+        BC_ORDERS[no] = {"id": f"guid-{no}", "number": no, "lines": [
+            {"id": f"{no}-L{i + 1}", "lineType": "Item", "lineObjectNumber": ln["lineObjectNumber"], "quantity": ln["quantity"],
+             "invoicedQuantity": 0, "shipQuantity": ln["quantity"], "invoiceQuantity": ln["quantity"], "etag": 1} for i, ln in enumerate(lines)]}
     return _json(201, {"id": f"guid-{no}", "number": no, **body})
+
+
+BC_ORDERS: dict = {}          # open Business Central sales orders by number
+BC_POSTED: list = []          # posted sales invoices
+BC_PATCHES: list = []
+
+
+def bc_orders(method, path, query, body, headers):
+    """salesOrders lookup, its lines, setting Qty. to Ship / Invoice, Ship and Invoice, and salesInvoices, as Business Central does."""
+    from urllib.parse import unquote
+    q = unquote(query)
+    if method == "GET" and path == f"{BASE}/salesOrders":
+        num = q.split("number eq '")[1].rstrip("'")
+        o = BC_ORDERS.get(num)
+        return _json(200, {"value": [{"id": o["id"], "number": num}] if o else []})
+    if method == "GET" and path == f"{BASE}/salesInvoices":
+        num = q.split("orderNumber eq '")[1].rstrip("'")
+        return _json(200, {"value": [x for x in BC_POSTED if x["orderNumber"] == num]})
+    o = next((x for x in BC_ORDERS.values() if path.startswith(f"{BASE}/salesOrders({x['id']})")), None)
+    if not o:
+        return _json(404, {"error": {"message": "The sales order does not exist."}})
+    rest = path[len(f"{BASE}/salesOrders({o['id']})"):]
+    if method == "GET" and rest == "/salesOrderLines":
+        return _json(200, {"value": [{**{k: v for k, v in l.items() if k != "etag"}, "@odata.etag": f'W/"{l["etag"]}"'} for l in o["lines"]]})
+    if method == "PATCH" and rest.startswith("/salesOrderLines("):
+        l = next(x for x in o["lines"] if rest == f"/salesOrderLines({x['id']})")
+        if headers.get("If-Match") not in ("*", f'W/"{l["etag"]}"'):
+            return _json(412, {"error": {"message": "Another user has already changed the record."}})
+        left = l["quantity"] - l["invoicedQuantity"]
+        if body["invoiceQuantity"] > left + 1e-9:
+            return _json(400, {"error": {"message": f"You cannot invoice more than {left} units."}})
+        BC_PATCHES.append((l["lineObjectNumber"], body["shipQuantity"], body["invoiceQuantity"]))
+        l.update(shipQuantity=body["shipQuantity"], invoiceQuantity=body["invoiceQuantity"], etag=l["etag"] + 1)
+        return _json(200, l)
+    if method == "POST" and rest == "/Microsoft.NAV.shipAndInvoice":
+        if not any(l["invoiceQuantity"] > 0 for l in o["lines"]):
+            return _json(400, {"error": {"message": "There is nothing to post."}})
+        for l in o["lines"]:
+            l["invoicedQuantity"] += l["invoiceQuantity"]
+            l["shipQuantity"] = l["invoiceQuantity"] = l["quantity"] - l["invoicedQuantity"]
+        BC_POSTED.append({"number": f"PSI-{101 + len(BC_POSTED)}", "orderNumber": o["number"], "postingDate": "2026-11-24",
+                          "lastModifiedDateTime": f"2026-11-24T10:{len(BC_POSTED):02d}:00Z"})
+        if all(l["invoicedQuantity"] >= l["quantity"] for l in o["lines"]):
+            del BC_ORDERS[o["number"]]          # Business Central deletes a fully invoiced order
+        return httpx.Response(204, request=httpx.Request("POST", "https://x"))
+    return _json(404, {"error": {"message": "not found"}})
 
 
 def fake_request(method, url, json=None, headers=None, **kw):
@@ -103,6 +153,8 @@ def fake_request(method, url, json=None, headers=None, **kw):
     if headers.get("Authorization") != "Bearer tok-123":
         return _json(401, {"error": {"message": "The credentials provided are incorrect"}})
     path, _, query = url.partition("?")
+    if path.startswith(f"{BASE}/salesOrders") and not (method == "POST" and path == f"{BASE}/salesOrders") or path == f"{BASE}/salesInvoices":
+        return bc_orders(method, path, query, json, headers)
     if method == "POST" and path == f"{BASE}/salesQuotes":
         return bc_create("quote", json)
     if method == "POST" and path == f"{BASE}/salesOrders":
@@ -461,3 +513,80 @@ def test_mrp_group_can_be_listed_as_including_gst(c):
                                   "lines": [{"material": "SF-001-500", "qty": 1}]}).json()
     assert d["total"] == 600                               # now 571.43 + 28.57
     c.put("/api/settings", json={"incl_gst_groups": "MRP"})
+
+
+
+def test_invoice_posts_the_order_in_business_central(c, monkeypatch):
+    """Invoice here -> the Business Central order is posted (Ship and Invoice) for exactly the invoiced quantities,
+    and the posted invoice number comes back; in two parts, then the order is gone from Business Central."""
+    connect(c, quotes="salesQuotes", orders="salesOrders")
+    c.put("/api/settings", json={"dynamics": {"auto_push": True, "post_invoices": True}, "round_off": True})
+    ids = {x["code"]: x["id"] for x in c.get("/api/customers").json()}
+    from app.services.common import local_today
+    today = local_today().isoformat()
+    o = c.post("/api/docs", json={"kind": "order", "customer_id": ids["C0001"], "date": today,
+                                  "lines": [{"material": "SF-001-500", "qty": 10}, {"material": "SF-002-500", "qty": 4}]}).json()
+    o = c.get(f"/api/docs/{o['id']}").json()
+    bc_no = o["sync"]["no"]
+    assert o["sync"]["status"] == "synced" and bc_no in BC_ORDERS
+    l1, l2 = [l["line_id"] for l in o["lines"]]
+    BC_PATCHES.clear()
+
+    i1 = c.post(f"/api/docs/{o['id']}/invoice", json={"lines": [{"line_id": l1, "qty": 6}]}).json()
+    g1 = c.get(f"/api/docs/{i1['id']}").json()
+    assert g1["sync"]["status"] == "synced" and g1["sync"]["no"] == BC_POSTED[-1]["number"], g1["sync"]
+    assert BC_PATCHES == [("SF-001-500", 6, 6), ("SF-002-500", 0, 0)]                    # only what this invoice bills
+    assert [l["invoicedQuantity"] for l in BC_ORDERS[bc_no]["lines"]] == [6, 0]
+
+    i2 = c.post(f"/api/docs/{o['id']}/invoice", json={}).json()                          # the rest
+    g2 = c.get(f"/api/docs/{i2['id']}").json()
+    assert g2["sync"]["status"] == "synced" and g2["sync"]["no"] != g1["sync"]["no"]
+    assert bc_no not in BC_ORDERS                                                         # fully invoiced: gone in BC
+    od = c.get(f"/api/docs/{o['id']}").json()
+    assert [x["dyn"] for x in od["invoices"]] == [g1["sync"]["no"], g2["sync"]["no"]]
+    r = c.post(f"/api/docs/{i2['id']}/cancel")                                            # posted: credit memo in BC
+    assert r.status_code == 409 and "credit memo" in r.json()["detail"]
+    assert not g2["can_cancel"] and not g2["can_post"]
+
+
+def test_order_not_in_dynamics_yet_then_retry(c):
+    c.put("/api/settings", json={"dynamics": {"auto_push": False, "post_invoices": True}})
+    ids = {x["code"]: x["id"] for x in c.get("/api/customers").json()}
+    from app.services.common import local_today
+    o = c.post("/api/docs", json={"kind": "order", "customer_id": ids["C0001"], "date": local_today().isoformat(),
+                                  "lines": [{"material": "SF-001-500", "qty": 2}]}).json()
+    inv = c.post(f"/api/docs/{o['id']}/invoice", json={}).json()
+    g = c.get(f"/api/docs/{inv['id']}").json()
+    assert g["sync"]["status"] == "error" and "not in Dynamics yet" in g["sync"]["error"] and g["can_post"]
+    assert c.post("/api/integration/push").json()["sent"] >= 1                           # send the order
+    r = c.post(f"/api/docs/{inv['id']}/post-dynamics")
+    assert r.status_code == 200 and r.json()["sync"]["status"] == "synced" and r.json()["sync"]["no"].startswith("PSI-")
+    assert c.post(f"/api/docs/{inv['id']}/post-dynamics").status_code == 409            # not twice
+
+
+def test_changed_order_in_dynamics_is_not_posted(c):
+    c.put("/api/settings", json={"dynamics": {"auto_push": True, "post_invoices": True}})
+    ids = {x["code"]: x["id"] for x in c.get("/api/customers").json()}
+    from app.services.common import local_today
+    o = c.post("/api/docs", json={"kind": "order", "customer_id": ids["C0001"], "date": local_today().isoformat(),
+                                  "lines": [{"material": "SF-001-500", "qty": 3}]}).json()
+    o = c.get(f"/api/docs/{o['id']}").json()
+    BC_ORDERS[o["sync"]["no"]]["lines"][0]["lineObjectNumber"] = "SF-999"                # someone changed it in BC
+    n = len(BC_POSTED)
+    inv = c.post(f"/api/docs/{o['id']}/invoice", json={}).json()
+    g = c.get(f"/api/docs/{inv['id']}").json()
+    assert g["sync"]["status"] == "error" and "SF-999" in g["sync"]["error"] and len(BC_POSTED) == n
+    # the invoice stays valid here; it can be cancelled (not posted) and the order invoiced again later
+    assert g["can_cancel"] and c.post(f"/api/docs/{inv['id']}/cancel").json()["status"] == "cancelled"
+
+
+def test_posting_off_leaves_invoices_local(c):
+    c.put("/api/settings", json={"dynamics": {"auto_push": True, "post_invoices": False}})
+    ids = {x["code"]: x["id"] for x in c.get("/api/customers").json()}
+    from app.services.common import local_today
+    o = c.post("/api/docs", json={"kind": "order", "customer_id": ids["C0001"], "date": local_today().isoformat(),
+                                  "lines": [{"material": "SF-001-500", "qty": 1}]}).json()
+    n = len(BC_POSTED)
+    inv = c.post(f"/api/docs/{o['id']}/invoice", json={}).json()
+    g = c.get(f"/api/docs/{inv['id']}").json()
+    assert g["sync"]["status"] == "na" and g["can_post"] and len(BC_POSTED) == n

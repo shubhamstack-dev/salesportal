@@ -1,4 +1,5 @@
 """Quotations, sales orders and payments. Prices and taxes are always worked out here, never trusted from the device."""
+import re
 from datetime import date
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -9,8 +10,9 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..models import Customer, Material, Payment, PaymentAllocation, SalesDoc, SalesDocLine, User
 from ..security import current_user, may_use_customer, visible_user_ids
-from ..services.dynamics import STATE_ABBR, auto_send
-from ..services.calc import build_lines, compute_totals, haversine_m, order_paid, outstanding
+from ..services.dynamics import STATE_ABBR, auto_send, post_invoice
+from ..services.calc import (build_lines, compute_totals, doc_due, haversine_m, invoiced_qty, invoices_of, order_paid, outstanding,
+                             pay_status)
 from ..services.common import (STATES, add_days, f, get_or_404, get_settings, iso_utc, local_today, next_no, now_utc,
                                parse_date, r2)
 from ..services.xl import workbook, xlsx_response
@@ -96,7 +98,7 @@ def doc_out(db: Session, d: SalesDoc, full=False) -> dict:
         out.update(delivery=d.delivery_date.isoformat() if d.delivery_date else None, po_ref=d.po_ref, remarks=d.remarks,
                    charges=d.chosen_charges, totals=d.totals, raw_status=d.status, quote_no=q.no if q else None, quote_id=d.quote_id,
                    order_no=conv.no if conv else None, loc={"lat": f(d.lat), "lng": f(d.lng)} if d.lat is not None else None,
-                   distance_m=dist, created_at=iso_utc(d.created_at), paid=order_paid(db, d.id) if d.kind == "order" else None,
+                   distance_m=dist, created_at=iso_utc(d.created_at), paid=order_paid(db, d.id) if d.kind in ("order", "inv") else None,
                    customer_detail={"code": c.code, "name": c.name, "gstin": c.gstin, "state": STATES.get(c.state, ""), "state_code": c.state,
                                     "address": ", ".join(x for x in [c.address, c.city, c.pin] if x), "street": c.address, "city": c.city,
                                     "pin": c.pin, "phone": c.phone, "email": c.email, "terms": c.terms, "price_group": c.price_group,
@@ -104,11 +106,37 @@ def doc_out(db: Session, d: SalesDoc, full=False) -> dict:
                    rep_code=rep.emp_code if rep else "", delivery_text=d.delivery_date.isoformat() if d.delivery_date else None,
                    lines=[{"material": l.material_code, "name": l.name, "uom": l.uom, "hsn": l.hsn, "qty": f(l.qty), "price": f(l.price),
                            "disc": f(l.disc), "gst_rate": f(l.gst_rate), "taxable": f(l.taxable), "gst": f(l.gst), "price_source": l.price_source,
-                           "price_incl": bool(l.price_incl), **_print_extra(db, l.material_code)} for l in d.lines])
+                           "price_incl": bool(l.price_incl), "line_id": l.id, **_print_extra(db, l.material_code)} for l in d.lines])
+        if d.kind == "order":
+            done = invoiced_qty(db, d)
+            for l, o in zip(d.lines, out["lines"]):
+                o["invoiced"] = done.get(l.id, 0)
+                o["to_invoice"] = round(max(0.0, float(l.qty) - done.get(l.id, 0)), 4)
+            out["invoices"] = [{"id": i.id, "no": i.no, "date": i.doc_date.isoformat(), "total": f(i.total), "pay": pay_status(db, i), "dyn": i.sync_no}
+                               for i in invoices_of(db, d.id)]
+        if d.kind == "inv":
+            o = db.get(SalesDoc, d.order_id) if d.order_id else None
+            out.update(order_no=o.no if o else None, order_id=d.order_id, due_date=d.valid_to.isoformat() if d.valid_to else None,
+                       quote_no=(db.get(SalesDoc, o.quote_id).no if o and o.quote_id else None),
+                       payments=[{"id": p.id, "no": p.no, "date": p.pay_date.isoformat(), "mode": MODES[p.mode], "amount": f(a.amount)}
+                                 for a, p in db.execute(select(PaymentAllocation, Payment).join(Payment, Payment.id == PaymentAllocation.payment_id)
+                                                        .where(PaymentAllocation.order_id == d.id, Payment.cancelled.is_(False)))])
+    if d.kind == "inv":
+        if "order_no" not in out:
+            o = db.get(SalesDoc, d.order_id) if d.order_id else None
+            out["order_no"] = o.no if o else None
+        out.update(due=doc_due(db, d) if d.status != "cancelled" else 0, pay=pay_status(db, d),
+                   due_date=d.valid_to.isoformat() if d.valid_to else None, paid=order_paid(db, d.id))
+    if d.kind == "order" and d.status == "approved":
+        billed = invoices_of(db, d.id)
+        left = any(float(l.qty) - invoiced_qty(db, d).get(l.id, 0) > 0.0001 for l in d.lines) if billed else True
+        out["invoiced"] = "" if not billed else ("partial" if left else "full")
     return out
 
 
 def _editable(db: Session, d: SalesDoc, me: User) -> bool:
+    if d.kind == "inv":
+        return False
     if d.rep_id != me.id and (me.role == "rep" or d.rep_id not in visible_user_ids(db, me)):
         return False
     if d.kind == "order":
@@ -193,7 +221,7 @@ def update_doc(doc_id: int, body: DocIn, tasks: BackgroundTasks, db: Session = D
 
 
 @router.get("/docs")
-def list_docs(kind: str, status: str = "", sync: str = "", date_from: str = "", date_to: str = "",
+def list_docs(kind: str, status: str = "", sync: str = "", date_from: str = "", date_to: str = "", pay: str = "",
               db: Session = Depends(get_db), me: User = Depends(current_user)):
     q = select(SalesDoc).where(SalesDoc.kind == kind, SalesDoc.rep_id.in_(visible_user_ids(db, me)))
     if status and status != "expired":
@@ -206,7 +234,10 @@ def list_docs(kind: str, status: str = "", sync: str = "", date_from: str = "", 
         q = q.where(SalesDoc.doc_date >= parse_date(date_from))
     if date_to:
         q = q.where(SalesDoc.doc_date <= parse_date(date_to))
-    return [doc_out(db, d) for d in db.scalars(q.order_by(SalesDoc.id.desc()).limit(500))]
+    rows = [doc_out(db, d) for d in db.scalars(q.order_by(SalesDoc.id.desc()).limit(500))]
+    if kind == "inv" and pay:
+        rows = [r for r in rows if r["pay"] == pay or (pay == "due" and r["pay"] in ("unpaid", "partly", "overdue"))]
+    return rows
 
 
 @router.get("/docs/{doc_id}")
@@ -218,6 +249,12 @@ def get_doc(doc_id: int, db: Session = Depends(get_db), me: User = Depends(curre
     out["editable"] = _editable(db, d, me)
     out["can_approve"] = d.kind == "order" and d.status == "submitted" and me.role in ("admin", "manager")
     out["can_cancel"] = d.status not in ("cancelled", "converted") and d.sync_status != "synced" and (d.rep_id == me.id or me.role != "rep")
+    if d.kind == "inv":
+        out["can_cancel"] = d.status == "open" and me.role in ("admin", "manager") and order_paid(db, d.id) == 0 and d.sync_status != "synced"
+        out["can_post"] = d.status == "open" and me.role in ("admin", "manager") and d.sync_status in ("na", "error")
+    if d.kind == "order":
+        out["can_cancel"] = out["can_cancel"] and not invoices_of(db, d.id)
+        out["can_invoice"] = d.status == "approved" and me.role in ("admin", "manager") and any(l["to_invoice"] > 0 for l in out["lines"])
     return out
 
 
@@ -234,15 +271,126 @@ def approve(doc_id: int, tasks: BackgroundTasks, db: Session = Depends(get_db), 
     return doc_out(db, d, True)
 
 
+class InvLineIn(BaseModel):
+    line_id: int
+    qty: float
+
+
+class InvoiceIn(BaseModel):
+    date: str | None = None
+    due_date: str | None = None
+    remarks: str = ""
+    lines: list[InvLineIn] | None = None        # None: everything not yet invoiced
+
+
+def _terms_days(terms: str) -> int:
+    """Credit days from a payment terms code such as 30D, NET 15 or 45 DAYS; 0 for cash or none."""
+    m = re.search(r"(\d{1,3})", terms or "")
+    return int(m[1]) if m else 0
+
+
+@router.post("/docs/{doc_id}/invoice")
+def make_invoice(doc_id: int, body: InvoiceIn, tasks: BackgroundTasks, db: Session = Depends(get_db), me: User = Depends(current_user)):
+    """Bills an approved sales order, wholly or in part. Prices, discounts and GST are the order's; each line can be
+    invoiced in more than one go until its quantity is used. Advances received on the order move to the invoice."""
+    o = get_or_404(db, SalesDoc, doc_id, "order")
+    if me.role not in ("admin", "manager") or o.rep_id not in visible_user_ids(db, me):
+        raise HTTPException(403, "Only a manager or administrator can make invoices.")
+    if o.kind != "order" or o.status != "approved":
+        raise HTTPException(409, "Only approved sales orders can be invoiced.")
+    c = db.get(Customer, o.customer_id)
+    on = parse_date(body.date, "Invoice date") or local_today()
+    if on > local_today():
+        raise HTTPException(422, "The invoice date cannot be in the future.")
+    if on < o.doc_date:
+        raise HTTPException(422, "The invoice date is before the order date.")
+    done = invoiced_qty(db, o)
+    want = {x.line_id: x.qty for x in body.lines} if body.lines is not None else None
+    if want and not set(want) <= {l.id for l in o.lines}:
+        raise HTTPException(422, "A line is not on this order.")
+    lines = []
+    for l in o.lines:
+        left = round(float(l.qty) - done.get(l.id, 0), 4)
+        q = round(float(want.get(l.id, 0) if want is not None else left), 4)
+        if q <= 0:
+            continue
+        if q > left + 0.0001:
+            raise HTTPException(422, f"{l.material_code}: only {left:g} {l.uom} is left to invoice.")
+        if abs(q - left) < 0.0001:      # last part of the line: what is left of the order's amount, so the parts add up exactly
+            billed = sum(float(x.taxable) for i in invoices_of(db, o.id) for x in i.lines if x.src_line_id == l.id)
+            taxable = r2(float(l.taxable) - billed)
+        else:
+            taxable = r2(float(l.taxable) * q / float(l.qty))
+        lines.append({"src": l, "qty": q, "taxable": taxable, "gst": r2(taxable * float(l.gst_rate) / 100),
+                      "cess": r2(taxable * float(l.cess_rate or 0) / 100)})
+    if not lines:
+        raise HTTPException(422, "Nothing is left to invoice on this order." if want is None else "Enter a quantity to invoice.")
+    totals = compute_totals(db, c, lines, o.chosen_charges)
+    due = parse_date(body.due_date, "Due date") or add_days(on, _terms_days(c.terms))
+    if due < on:
+        raise HTTPException(422, "The due date is before the invoice date.")
+    inv = SalesDoc(kind="inv", no=next_no(db, "invoice", on), customer_id=o.customer_id, rep_id=o.rep_id, doc_date=on, valid_to=due,
+                   delivery_date=o.delivery_date, po_ref=o.po_ref, remarks=(body.remarks.strip() or o.remarks)[:500], status="open",
+                   chosen_charges=list(o.chosen_charges or []), totals=totals, total=totals["total"], order_id=o.id, quote_id=None,
+                   approved_by=me.id, approved_at=now_utc(), sync_status="na", updated_at=now_utc(),
+                   lines=[SalesDocLine(line_no=i + 1, material_code=x["src"].material_code, name=x["src"].name, uom=x["src"].uom, hsn=x["src"].hsn,
+                                       qty=x["qty"], price=x["src"].price, disc=x["src"].disc, gst_rate=x["src"].gst_rate, cess_rate=x["src"].cess_rate,
+                                       taxable=x["taxable"], gst=x["gst"], price_source=x["src"].price_source, price_incl=x["src"].price_incl,
+                                       src_line_id=x["src"].id) for i, x in enumerate(lines)])
+    db.add(inv)
+    db.flush()
+    # advances received on the order now pay this invoice, oldest first
+    room = float(inv.total)
+    for a, p in db.execute(select(PaymentAllocation, Payment).join(Payment, Payment.id == PaymentAllocation.payment_id)
+                           .where(PaymentAllocation.order_id == o.id, Payment.cancelled.is_(False)).order_by(Payment.pay_date, Payment.id)).all():
+        if room <= 0.004:
+            break
+        take = r2(min(float(a.amount), room))
+        if take >= float(a.amount) - 0.004:
+            a.order_id = inv.id
+        else:
+            a.amount = r2(float(a.amount) - take)
+            db.add(PaymentAllocation(payment_id=p.id, order_id=inv.id, amount=take))
+        room = r2(room - take)
+    if get_settings(db)["dynamics"].get("post_invoices"):     # post the order in Business Central right after the reply
+        inv.sync_status = "pending"
+        tasks.add_task(post_invoice, inv.id)
+    db.commit()
+    return doc_out(db, inv, True)
+
+
+@router.post("/docs/{doc_id}/post-dynamics")
+def post_in_dynamics(doc_id: int, db: Session = Depends(get_db), me: User = Depends(current_user)):
+    """Posts (again) the invoice's sales order in Business Central, for an invoice that failed or was made before
+    posting was turned on. Runs now, so the answer shows the result."""
+    inv = get_or_404(db, SalesDoc, doc_id, "invoice")
+    if me.role not in ("admin", "manager"):
+        raise HTTPException(403, "Only a manager or administrator can post invoices.")
+    if inv.kind != "inv" or inv.status != "open":
+        raise HTTPException(409, "Only open invoices can be posted.")
+    if inv.sync_status == "synced":
+        raise HTTPException(409, f"Already posted in Dynamics as {inv.sync_no}.")
+    inv.sync_status, inv.sync_error = "pending", None
+    db.commit()
+    post_invoice(inv.id)
+    db.expire_all()
+    return doc_out(db, db.get(SalesDoc, doc_id), True)
+
+
 @router.post("/docs/{doc_id}/cancel")
 def cancel(doc_id: int, db: Session = Depends(get_db), me: User = Depends(current_user)):
     d = get_or_404(db, SalesDoc, doc_id, "document")
     if d.rep_id not in visible_user_ids(db, me) or (me.role == "rep" and d.rep_id != me.id):
         raise HTTPException(403, "You cannot cancel this document.")
     if d.status in ("cancelled", "converted") or d.sync_status == "synced":
-        raise HTTPException(409, "This document can no longer be cancelled here; cancel it in Dynamics.")
-    if d.kind == "order" and order_paid(db, d.id) > 0:
-        raise HTTPException(409, "Payments are allocated to this order. Cancel those receipts first.")
+        raise HTTPException(409, "This invoice is posted in Dynamics; cancel it there with a sales credit memo." if d.kind == "inv"
+                            else "This document can no longer be cancelled here; cancel it in Dynamics.")
+    if d.kind == "order" and invoices_of(db, d.id):
+        raise HTTPException(409, "This order has invoices. Cancel the invoices first.")
+    if d.kind in ("order", "inv") and order_paid(db, d.id) > 0:
+        raise HTTPException(409, f"Payments are allocated to this {'invoice' if d.kind == 'inv' else 'order'}. Cancel those receipts first.")
+    if d.kind == "inv" and me.role not in ("admin", "manager"):
+        raise HTTPException(403, "Only a manager or administrator can cancel invoices.")
     d.status = "cancelled"
     if d.sync_status != "exported":
         d.sync_status = "na"
@@ -299,7 +447,8 @@ def pay_out(db: Session, p: Payment, full=False) -> dict:
     if full:
         out.update(bank=p.bank, cheque_date=p.cheque_date.isoformat() if p.cheque_date else None, remarks=p.remarks,
                    loc={"lat": f(p.lat), "lng": f(p.lng)} if p.lat is not None else None,
-                   allocations=[{"order_id": a.order_id, "order_no": db.get(SalesDoc, a.order_id).no, "amount": f(a.amount)} for a in p.allocations])
+                   allocations=[{"order_id": a.order_id, "order_no": db.get(SalesDoc, a.order_id).no, "amount": f(a.amount),
+                                 "kind": db.get(SalesDoc, a.order_id).kind} for a in p.allocations])
     return out
 
 
@@ -323,11 +472,12 @@ def create_payment(body: PaymentIn, db: Session = Depends(get_db), me: User = De
         raise HTTPException(422, "Allocations add up to more than the amount received.")
     for a in allocs:
         o = db.get(SalesDoc, a.order_id)
-        if not o or o.kind != "order" or o.customer_id != c.id or o.status not in ("submitted", "approved"):
-            raise HTTPException(422, "An allocation is to an order that is not open for this customer.")
-        due = r2(float(o.total) - order_paid(db, o.id))
+        ok = o and o.customer_id == c.id and ((o.kind == "inv" and o.status == "open") or (o.kind == "order" and o.status in ("submitted", "approved")))
+        if not ok:
+            raise HTTPException(422, "An allocation is to an invoice or order that is not open for this customer.")
+        due = doc_due(db, o)
         if a.amount > due + 0.001:
-            raise HTTPException(422, f"{o.no} has only ₹{due:,.2f} due.")
+            raise HTTPException(422, f"{o.no} has only ₹{max(due, 0):,.2f} due.")
     p = Payment(no=next_no(db, "payment", on), customer_id=c.id, rep_id=me.id, pay_date=on, amount=amount, mode=body.mode,
                 ref=body.ref.strip()[:60], bank=body.bank.strip()[:80], cheque_date=parse_date(body.cheque_date, "Cheque date"),
                 remarks=body.remarks.strip()[:300], lat=body.lat, lng=body.lng, sync_status="pending",
