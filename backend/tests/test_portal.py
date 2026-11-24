@@ -247,3 +247,13 @@ def test_self_registration_needs_approval(c, admin):
     assert c.delete(f"/api/users/{spam['id']}", headers=H(admin)).status_code == 200
     assert not any(u["username"] == "spam1" for u in c.get("/api/users", headers=H(admin)).json())
     assert c.get("/api/counts", headers=H(admin)).json()["employees"] == 0
+
+
+def test_register_can_be_turned_off(c, admin):
+    assert c.get("/api/auth/status").json()["register"] is True
+    assert c.put("/api/settings", json={"allow_register": False}, headers=H(admin)).status_code == 200
+    assert c.get("/api/auth/status").json()["register"] is False
+    r = c.post("/api/auth/register", json={"name": "Off", "username": "off.user", "password": "off12345"})
+    assert r.status_code == 403 and "turned off" in r.json()["detail"]
+    c.put("/api/settings", json={"allow_register": True}, headers=H(admin))
+    assert c.post("/api/auth/register", json={"name": "On", "username": "on.user", "password": "on123456"}).status_code == 200

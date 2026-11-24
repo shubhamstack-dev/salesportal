@@ -50,7 +50,8 @@ def me_out(db: Session, u: User) -> dict:
 def status(db: Session = Depends(get_db)):
     ms = get_settings(db).get("microsoft") or {}
     return {"needs_setup": not db.scalar(select(func.count(User.id))), "company": get_settings(db)["company"]["name"],
-            "microsoft": bool(ms.get("enabled") and ms.get("tenant_id") and ms.get("client_id") and ms.get("client_secret"))}
+            "microsoft": bool(ms.get("enabled") and ms.get("tenant_id") and ms.get("client_id") and ms.get("client_secret")),
+            "register": bool(get_settings(db).get("allow_register", True))}
 
 
 @router.post("/setup")
@@ -87,6 +88,8 @@ def register(body: RegisterIn, db: Session = Depends(get_db)):
     and an administrator approves it under Employees before it can sign in."""
     if not db.scalar(select(func.count(User.id))):
         raise HTTPException(409, "The portal is not set up yet. Create the administrator first.")
+    if not get_settings(db).get("allow_register", True):
+        raise HTTPException(403, "Registration is turned off. Ask your administrator for an account.")
     name, username = body.name.strip(), body.username.strip().lower()
     if not name or not username:
         raise HTTPException(422, "Enter your name and a username.")

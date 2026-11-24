@@ -25,7 +25,7 @@ export default function Settings() {
         ifsc: f.ifsc.trim().toUpperCase(), upi_id: f.upi_id.trim(), jurisdiction: f.jurisdiction.trim(), terms: f.terms,
         quote_declaration: f.quote_declaration.trim(), order_declaration: f.order_declaration.trim() },
       prefixes: { order: f.p_order, quote: f.p_quote, payment: f.p_payment, expense: f.p_expense }, quote_days: +f.quote_days || 15,
-      need_approval: !!f.need_approval, mrp_incl_gst: !!f.mrp_incl_gst, incl_gst_groups: f.incl_gst_groups.trim().toUpperCase(), credit_check: f.credit_check, price_override: !!f.price_override, round_off: !!f.round_off,
+      allow_register: !!f.allow_register, need_approval: !!f.need_approval, mrp_incl_gst: !!f.mrp_incl_gst, incl_gst_groups: f.incl_gst_groups.trim().toUpperCase(), credit_check: f.credit_check, price_override: !!f.price_override, round_off: !!f.round_off,
       shift_start: f.shift_start, grace_min: +f.grace_min || 0, full_day_hrs: +f.full_day_hrs || 8, half_day_hrs: +f.half_day_hrs || 4, punch_needs_location: !!f.punch_needs_location,
       maps_key: f.maps_key.trim(), geofence_m: +f.geofence_m || 300 }
     try { await api('/api/settings', { method: 'PUT', body }); toast('Settings saved'); reload(); reloadMe() } catch (e2) { toast(e2.message) }
@@ -69,6 +69,7 @@ export default function Settings() {
       {['order', 'quote', 'payment', 'expense'].map((k) => <label key={k} className="field">{k[0].toUpperCase() + k.slice(1)} number prefix<input className="inp" name={'p_' + k} defaultValue={s.prefixes[k]} /></label>)}
       <label className="field">Quotations valid for (days)<input className="inp" name="quote_days" defaultValue={s.quote_days} /></label>
       <label className="field">Credit limit check<select className="inp" name="credit_check" defaultValue={s.credit_check}><option value="warn">Warn</option><option value="block">Block orders over the limit</option><option value="off">Off</option></select></label>
+      <label className="chk wide"><input type="checkbox" name="allow_register" defaultChecked={s.allow_register ?? true} /> <span><b>Show the Register button</b> on the sign-in page, so new staff can ask for an account (an administrator approves it). Untick to hide it: only administrators add people.</span></label>
       <label className="chk"><input type="checkbox" name="need_approval" defaultChecked={s.need_approval} /> Sales representatives' orders need approval</label>
       <label className="chk"><input type="checkbox" name="price_override" defaultChecked={s.price_override} /> Sales staff may change prices</label>
       <label className="chk"><input type="checkbox" name="round_off" defaultChecked={s.round_off} /> Round totals to the rupee</label>
