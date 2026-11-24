@@ -19,6 +19,8 @@ export default function Settings() {
     const f = Object.fromEntries(new FormData(e.target))
     const body = { company: { name: f.name, gstin: f.gstin.trim().toUpperCase(), state: f.state, address: f.address, legal_name: f.legal_name.trim(),
         phone: f.phone.trim(), email: f.email.trim(), pan: f.pan.trim().toUpperCase(), fssai: f.fssai.trim() },
+      microsoft: { enabled: !!f.ms_enabled, tenant_id: f.ms_tenant.trim(), client_id: f.ms_client.trim(), client_secret: f.ms_secret,
+        domains: f.ms_domains.trim().toLowerCase(), auto_register: !!f.ms_auto },
       print: { bank_name: f.bank_name.trim(), account_name: f.account_name.trim(), account_no: f.account_no.trim(), branch: f.branch.trim(),
         ifsc: f.ifsc.trim().toUpperCase(), upi_id: f.upi_id.trim(), jurisdiction: f.jurisdiction.trim(), terms: f.terms,
         quote_declaration: f.quote_declaration.trim(), order_declaration: f.order_declaration.trim() },
@@ -28,7 +30,8 @@ export default function Settings() {
       maps_key: f.maps_key.trim(), geofence_m: +f.geofence_m || 300 }
     try { await api('/api/settings', { method: 'PUT', body }); toast('Settings saved'); reload(); reloadMe() } catch (e2) { toast(e2.message) }
   }
-  const c = s.company, p = s.print || {}
+  const c = s.company, p = s.print || {}, m = s.microsoft || {}
+  const redirect = `${window.location.origin}/api/auth/microsoft/callback`
   return (<form onSubmit={save}>
     <div className="card"><div className="hd"><div><h2>Company</h2><p className="sub">The company state decides CGST + SGST (same state) or IGST (other states). Name, address, GSTIN, PAN, FSSAI and bank details print on quotations and orders.</p></div>
       <button type="button" className="btn" onClick={fromDynamics}>Get from Dynamics</button></div><div className="form" key={ver}>
@@ -40,6 +43,17 @@ export default function Settings() {
       <label className="field">PAN<input className="inp" name="pan" defaultValue={c.pan} maxLength={10} /></label>
       <label className="field">FSSAI licence no.<input className="inp" name="fssai" defaultValue={c.fssai} /></label>
       <label className="field wide">Address (printed on documents; one line per row)<textarea className="inp" name="address" rows={3} defaultValue={c.address} /></label></div></div>
+    <div className="card"><h2>Sign in with Microsoft</h2><p className="sub">Staff sign in with their Microsoft 365 account (Entra ID). Usernames and passwords keep working. Register the portal in Azure with this redirect URI:</p>
+      <div className="note" style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}><code style={{ flex: 1, wordBreak: 'break-all' }}>{redirect}</code>
+        <button type="button" className="btn sm" onClick={() => { navigator.clipboard?.writeText(redirect); toast('Redirect URI copied') }}>Copy</button></div>
+      <div className="form" key={'ms' + ver}>
+      <label className="chk wide"><input type="checkbox" name="ms_enabled" defaultChecked={m.enabled} /> <b>Show "Sign in with Microsoft" on the sign-in page</b></label>
+      <label className="field">Directory (tenant) ID<input className="inp" name="ms_tenant" defaultValue={m.tenant_id} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autoComplete="off" /></label>
+      <label className="field">Application (client) ID<input className="inp" name="ms_client" defaultValue={m.client_id} placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx" autoComplete="off" /></label>
+      <label className="field">Client secret (Value)<input className="inp" name="ms_secret" type="password" defaultValue={m.client_secret} autoComplete="new-password" /></label>
+      <label className="field">Allowed e-mail domains<input className="inp" name="ms_domains" defaultValue={m.domains} placeholder="samuraifoods.co.in" /></label>
+      <label className="chk wide"><input type="checkbox" name="ms_auto" defaultChecked={m.auto_register ?? true} /> <span>A company account that is not a portal user yet becomes a <b>registration request</b> under Employees and users, for an administrator to approve. Untick to allow only people already added.</span></label></div>
+      <p className="fine">Existing employees are matched by the <b>E-mail</b> on their employee record (or a username that is their Microsoft e-mail), so fill in each employee's company e-mail.</p></div>
     <div className="card"><h2>Printed quotations and sales orders</h2><p className="sub">Bank details, the UPI QR code, declarations and the terms printed on page 2. "Get from Dynamics" above fills the bank details too.</p><div className="form" key={ver}>
       <label className="field">Bank<input className="inp" name="bank_name" defaultValue={p.bank_name} /></label>
       <label className="field">Account name<input className="inp" name="account_name" defaultValue={p.account_name} placeholder="Company name if empty" /></label>

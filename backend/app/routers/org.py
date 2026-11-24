@@ -19,7 +19,8 @@ admin = require("admin")
 def user_out(u: User) -> dict:
     return {"id": u.id, "name": u.name, "username": u.username, "role": u.role, "role_label": ROLES[u.role], "emp_code": u.emp_code,
             "phone": u.phone, "email": u.email, "manager_id": u.manager_id, "territory": u.territory, "grade": u.grade_code,
-            "active": u.active, "joined_on": u.joined_on.isoformat(), "customer_ids": [c.customer_id for c in u.customers]}
+            "active": u.active, "joined_on": u.joined_on.isoformat(), "customer_ids": [c.customer_id for c in u.customers],
+            "microsoft": bool(u.ms_oid)}
 
 
 class UserIn(BaseModel):
@@ -184,6 +185,11 @@ def write_settings(body: dict, db: Session = Depends(get_db), _=Depends(admin)):
     for k in SECRET_KEYS:          # a masked or empty secret keeps the stored one
         if dyn.get(k) in ("••••••", None):
             dyn.pop(k, None)
+    ms = body.get("microsoft") or {}
+    if ms.get("client_secret") in ("••••••", None):
+        ms.pop("client_secret", None)
+    if ms.get("tenant_id") and not re.fullmatch(r"[0-9a-fA-F-]{36}|[a-z0-9.-]+\.[a-z]{2,}", ms["tenant_id"].strip()):
+        raise HTTPException(422, "The Microsoft tenant ID should be a GUID such as 5d63832e-cc98-… or a domain.")
     s = body.get("company", {})
     if s.get("gstin") and not re.fullmatch(r"\d{2}[A-Z]{5}\d{4}[A-Z][0-9A-Z]Z[0-9A-Z]", s["gstin"].upper()):
         raise HTTPException(422, "The company GSTIN does not look valid.")

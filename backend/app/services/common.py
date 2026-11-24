@@ -16,6 +16,9 @@ TZ = ZoneInfo(APP_TZ)
 DEFAULT_SETTINGS = {
     "company": {"name": "Samurai Foods", "gstin": "", "state": "09", "address": "", "legal_name": "", "phone": "", "email": "",
                 "pan": "", "fssai": ""},
+    # Sign in with Microsoft (Entra ID / Microsoft 365 accounts)
+    "microsoft": {"enabled": False, "tenant_id": "", "client_id": "", "client_secret": "", "domains": "samuraifoods.co.in",
+                  "auto_register": True},
     # Printed quotations and sales orders (layout of the Samurai Foods Word templates)
     "print": {"bank_name": "", "account_name": "", "account_no": "", "branch": "", "ifsc": "", "upi_id": "",
               "jurisdiction": "Lucknow, Uttar Pradesh",
@@ -76,8 +79,12 @@ def public_settings(s: dict, admin: bool) -> dict:
     for k in SECRET_KEYS:
         if s["dynamics"].get(k):
             s["dynamics"][k] = "••••••" if admin else ""
+    ms = s.get("microsoft") or {}
+    if ms.get("client_secret"):
+        ms["client_secret"] = "••••••" if admin else ""
     if not admin:
         s["dynamics"] = {"product": s["dynamics"]["product"]}
+        s["microsoft"] = {"enabled": bool(ms.get("enabled"))}
     return s
 
 

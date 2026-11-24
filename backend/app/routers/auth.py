@@ -48,7 +48,9 @@ def me_out(db: Session, u: User) -> dict:
 
 @router.get("/status")
 def status(db: Session = Depends(get_db)):
-    return {"needs_setup": not db.scalar(select(func.count(User.id))), "company": get_settings(db)["company"]["name"]}
+    ms = get_settings(db).get("microsoft") or {}
+    return {"needs_setup": not db.scalar(select(func.count(User.id))), "company": get_settings(db)["company"]["name"],
+            "microsoft": bool(ms.get("enabled") and ms.get("tenant_id") and ms.get("client_id") and ms.get("client_secret"))}
 
 
 @router.post("/setup")

@@ -60,6 +60,7 @@ class User(Base):
     active: Mapped[bool] = mapped_column(Boolean, default=True)
     joined_on: Mapped[date] = mapped_column(Date)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=utcnow)
+    ms_oid: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)   # Microsoft Entra ID object id, once signed in with Microsoft
     customers: Mapped[list["UserCustomer"]] = relationship(cascade="all, delete-orphan", lazy="selectin")
 
 

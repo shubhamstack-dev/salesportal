@@ -5,7 +5,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from .db import add_missing_columns, CORS_ORIGINS, Base, engine
-from .routers import attendance, auth, dashboard, expenses, integration, masters, org, sales
+from .routers import attendance, auth, dashboard, expenses, integration, masters, microsoft, org, sales
 
 
 @asynccontextmanager
@@ -24,5 +24,5 @@ def health():
     return {"ok": True}
 
 
-for r in (auth, org, masters, sales, expenses, attendance, dashboard, integration):
+for r in (auth, microsoft, org, masters, sales, expenses, attendance, dashboard, integration):
     app.include_router(r.router)

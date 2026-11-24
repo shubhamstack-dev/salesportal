@@ -56,36 +56,48 @@ export default function App() { return <UiProvider><Root /></UiProvider> }
 
 function Root() {
   const [stage, setStage] = useState('loading')
+  const [msOn, setMsOn] = useState(false)
+  const [info, setInfo] = useState('')
   const [me, setMe] = useState(null)
   const [msg, setMsg] = useState('')
   const [company, setCompany] = useState('Sales Portal')
-  const signOutLocal = useCallback((m = '') => { setToken(null); setMe(null); setMsg(m); setStage('login') }, [])
+  const signOutLocal = useCallback((m = '') => {
+    setToken(null); setMe(null); setMsg(m); setInfo(''); setStage('login')
+    api('/api/auth/status').then((st) => setMsOn(!!st.microsoft)).catch(() => {})     // settings may have changed meanwhile
+  }, [])
   useEffect(() => {
     setUnauthorizedHandler((m) => signOutLocal(m))
     ;(async () => {
       try {
-        const st = await api('/api/auth/status'); setCompany(st.company)
+        // back from Microsoft: /#ms_token=… (signed in), ms_error=… or ms_info=…
+        const h = new URLSearchParams(window.location.hash.replace(/^#\/?/, ''))
+        if (h.get('ms_token') || h.get('ms_error') || h.get('ms_info')) {
+          if (h.get('ms_token')) setToken(h.get('ms_token'))
+          setMsg(h.get('ms_error') || ''); setInfo(h.get('ms_info') || '')
+          history.replaceState(null, '', window.location.pathname + '#/')
+        }
+        const st = await api('/api/auth/status'); setCompany(st.company); setMsOn(!!st.microsoft)
         if (getToken()) { setMe(await api('/api/auth/me')); setStage('ready'); return }
         setStage(st.needs_setup ? 'setup' : 'login')
       } catch (e) { if (e.status !== 401) { setMsg(e.message); setStage('login') } }
     })()
   }, [signOutLocal])
   if (stage === 'loading') return <div className="loading">Loading…</div>
-  if (stage !== 'ready') return <SignIn mode={stage} company={company} message={msg} onDone={(d) => {
+  if (stage !== 'ready') return <SignIn mode={stage} company={company} message={msg} notice={info} microsoft={msOn} onDone={(d) => {
     setToken(d.token); setMe(d); setMsg(''); setStage('ready')
     history.replaceState(null, '', '#/' + (d.user.role === 'rep' ? 'myday' : 'dashboard'))
   }} />
   return <Shell me={me} setMe={setMe} onSignOut={() => signOutLocal()} />
 }
 
-function SignIn({ mode, company, message, onDone }) {
+function SignIn({ mode, company, message, notice, microsoft, onDone }) {
   const setup = mode === 'setup'
   const [view, setView] = useState('login')          // login | register (ignored during first setup)
   const register = !setup && view === 'register'
   const blank = { name: '', username: '', phone: '', password: '', password2: '', company }
   const [f, setF] = useState(blank)
   const [err, setErr] = useState(message)
-  const [info, setInfo] = useState('')
+  const [info, setInfo] = useState(notice || '')
   const [busy, setBusy] = useState(false)
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value })
   const switchTo = (v) => { setView(v); setErr(''); setInfo(''); setF({ ...blank, username: v === 'login' ? f.username : '' }) }
@@ -120,6 +132,10 @@ function SignIn({ mode, company, message, onDone }) {
       {(setup || register) && <label className="field">Repeat password<input className="inp" type="password" value={f.password2} onChange={set('password2')} autoComplete="new-password" /></label>}
       <p className="err">{err}</p>
       <button className="btn pri lg" disabled={busy}>{setup ? 'Create and sign in' : register ? 'Register' : 'Sign in'}</button>
+      {!setup && microsoft && <>
+        <div className="or"><span>or</span></div>
+        <a className="btn lg ms" href="/api/auth/microsoft/start"><svg viewBox="0 0 21 21" width="18" height="18" aria-hidden="true"><rect x="1" y="1" width="9" height="9" fill="#f25022" /><rect x="11" y="1" width="9" height="9" fill="#7fba00" /><rect x="1" y="11" width="9" height="9" fill="#00a4ef" /><rect x="11" y="11" width="9" height="9" fill="#ffb900" /></svg>
+          {register ? 'Register with Microsoft' : 'Sign in with Microsoft'}</a></>}
       {!setup && <div className="login-alt">
         <span>{register ? 'Already have an account?' : 'New here?'}</span>
         <button type="button" className="btn lg" onClick={() => switchTo(register ? 'login' : 'register')}>{register ? 'Back to sign in' : 'Register'}</button>

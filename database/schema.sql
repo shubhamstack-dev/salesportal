@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS `users` (
   `active` tinyint(1) NOT NULL,
   `joined_on` date NOT NULL,
   `created_at` datetime NOT NULL,
+  `ms_oid` varchar(64) NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `ix_users_username` (`username`),
   KEY `manager_id` (`manager_id`),
