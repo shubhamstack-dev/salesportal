@@ -229,7 +229,9 @@ def fake_request(method, url, json=None, headers=None, **kw):
         BC_PAYMENTS.append(json)
         # like the real customerPayments API: a positive amount is a payment received; the journal line gets it negated,
         # and posting a cash receipt line for a customer needs it negative
-        BC_PAYMENTS[-1] = {**json, "journalAmount": -json.get("amount", 0)}
+        # like the real customerPayments API (seen in AequmTest): the journal line keeps the amount as sent,
+        # and Business Central posts a customer cash receipt only when it is negative
+        BC_PAYMENTS[-1] = {**json, "journalAmount": json.get("amount", 0)}
         return _json(201, {**json, "id": f"pay-{len(BC_PAYMENTS)}"})
     if method == "POST" and path == f"{BASE}/salesQuotes":
         return bc_create("quote", json)
@@ -727,7 +729,7 @@ def test_screenshot_flow_quote_lots_manual_post_and_payment(c):
     BC_PAYMENTS.clear()
     c.post("/api/integration/push")
     mine = [x for x in BC_PAYMENTS if x["documentNumber"] == p["no"]]
-    assert len(mine) == 1 and mine[0]["appliesToInvoiceNumber"] == posted and mine[0]["amount"] == total and mine[0]["journalAmount"] == -total
+    assert len(mine) == 1 and mine[0]["appliesToInvoiceNumber"] == posted and mine[0]["amount"] == -total and mine[0]["journalAmount"] == -total
 
 
 def test_order_differs_from_quote(c):
@@ -800,10 +802,10 @@ def test_journal_payments_post_negative_in_bc(c):
     c.post("/api/payments", json={"customer_id": ids["C0001"], "date": local_today().isoformat(), "amount": 250, "mode": "cash", "ref": "", "allocations": []})
     BC_PAYMENTS.clear()
     c.post("/api/integration/push")
-    assert BC_PAYMENTS and all(x["amount"] > 0 and x["journalAmount"] < 0 for x in BC_PAYMENTS), BC_PAYMENTS
+    assert BC_PAYMENTS and all(x["amount"] < 0 and x["journalAmount"] < 0 for x in BC_PAYMENTS), BC_PAYMENTS
     s = c.get("/api/settings").json()["dynamics"]; s["payments_negative"] = True     # export-file setting: no effect on the API
     c.put("/api/settings", json={"dynamics": s})
     c.post("/api/payments", json={"customer_id": ids["C0001"], "date": local_today().isoformat(), "amount": 90, "mode": "cash", "ref": "", "allocations": []})
     BC_PAYMENTS.clear()
     c.post("/api/integration/push")
-    assert BC_PAYMENTS and all(x["amount"] > 0 and x["journalAmount"] < 0 for x in BC_PAYMENTS), BC_PAYMENTS
+    assert BC_PAYMENTS and all(x["amount"] < 0 and x["journalAmount"] < 0 for x in BC_PAYMENTS), BC_PAYMENTS

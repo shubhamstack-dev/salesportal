@@ -869,9 +869,10 @@ def post_invoice(doc_id: int) -> None:
         db.commit()
 
 
-def payment_api_lines(db: Session, p: Payment, negative: bool = False) -> list[dict]:
-    """The Business Central customerPayments API takes a payment received as a POSITIVE amount and negates it on the
-    journal line itself, so the API always gets positive amounts (negative=True only for other targets).
+def payment_api_lines(db: Session, p: Payment, negative: bool = True) -> list[dict]:
+    """The Business Central customerPayments API writes the amount to the cash receipt journal line exactly as sent
+    (checked in AequmTest: +660 sent, +660 on the line, which then fails to post), and a customer payment must be
+    negative to post, so the API always gets negative amounts, whatever the export-file setting says.
 Customer payment journal lines for one receipt, applied as in Business Central: one line per invoice that is
     posted there (Applies-to Doc. No. = its posted invoice number), and one line for the rest (on account / advances)."""
     c = db.get(Customer, p.customer_id)
