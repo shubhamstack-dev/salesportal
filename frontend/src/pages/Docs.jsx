@@ -19,9 +19,9 @@ export const Sync = ({ x }) => <><span className={`badge ${SYNC[x.status][1]}`} 
 export function DocList({ kind, route }) {
   const { isMgr, settings } = useSession(); const { toast } = useUi()
   const q = route.q, st = q.get('status') || '', sy = q.get('sync') || '', from = q.get('from') || '', to = q.get('to') || '', pay = q.get('pay') || ''
-  const [rows] = useLoad(() => api(`/api/docs?kind=${kind}&status=${st}&sync=${sy}&date_from=${from}&date_to=${to}&pay=${pay}`), [kind, st, sy, from, to, pay])
+  const [rows, reloadRows] = useLoad(() => api(`/api/docs?kind=${kind}&status=${st}&sync=${sy}&date_from=${from}&date_to=${to}&pay=${pay}`), [kind, st, sy, from, to, pay])
   const [view, setView] = useState(+q.get('view') || null)
-  if (kind === 'inv') return <InvoiceList rows={rows} q={q} view={view} setView={setView} />
+  if (kind === 'inv') return <InvoiceList rows={rows} q={q} view={view} setView={(v) => { setView(v); if (!v) reloadRows() }} />
   const setQ = (k, v) => { const p = new URLSearchParams(q); v ? p.set(k, v) : p.delete(k); go(`${K[kind].list}?${p}`) }
   const statuses = kind === 'quote' ? ['draft', 'open', 'converted', 'expired', 'cancelled'] : ['draft', 'submitted', 'approved', 'cancelled']
   return (<div className="card"><div className="hd"><div><h2>{K[kind].title}</h2><p className="sub">{kind === 'quote'
@@ -135,7 +135,8 @@ function DocView({ id, onClose }) {
       {d.can_approve && <button className="btn ok" onClick={() => act('approve', `${d.no} approved and queued for Dynamics`)}>Approve</button>}
       {d.kind === 'quote' && d.raw_status === 'open' && <a className="btn pri" href={`#/order/new?q=${d.id}`} onClick={onClose}>Convert to order</a>}
       {d.can_invoice && <button className="btn pri" onClick={() => setInvoicing(true)}>Create invoice</button>}
-      {d.can_post && <button className="btn" onClick={async () => { try { const r = await api(`/api/docs/${id}/post-dynamics`, { method: 'POST' }); toast(r.sync.status === 'synced' ? `Posted in Dynamics as ${r.sync.no}` : `Not posted: ${r.sync.error}`); reload() } catch (e) { toast(e.message) } }}>Post in Dynamics</button>}
+      {d.can_post && <button className="btn" title="Posts the order in Dynamics for this invoice, or links the invoice if it was already posted there" onClick={async () => { try { const r = await api(`/api/docs/${id}/post-dynamics`, { method: 'POST' }); toast(r.sync.status === 'synced' ? `In Dynamics as invoice ${r.sync.no}` : `Not posted: ${r.sync.error}`); reload() } catch (e) { toast(e.message) } }}>Post in Dynamics</button>}
+      {inv && d.status === 'open' && d.due > 0 && d.on_account > 0 && <button className="btn" onClick={async () => { try { const r = await api(`/api/docs/${id}/apply-on-account`, { method: 'POST' }); toast(r.due > 0 ? `Applied; ${inr(r.due)} still due` : 'Paid from money on account'); reload() } catch (e) { toast(e.message) } }}>Apply {inr0(Math.min(d.on_account, d.due))} on account</button>}
       {inv && d.status === 'open' && d.due > 0 && <a className="btn pri" href={`#/payment/new?c=${d.customer_id}&inv=${d.id}`} onClick={onClose}>Receive payment</a>}
       <button className="btn" onClick={onClose}>Close</button></div></div>}</Modal>
 }

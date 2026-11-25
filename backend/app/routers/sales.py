@@ -121,6 +121,8 @@ def doc_out(db: Session, d: SalesDoc, full=False) -> dict:
                        payments=[{"id": p.id, "no": p.no, "date": p.pay_date.isoformat(), "mode": MODES[p.mode], "amount": f(a.amount)}
                                  for a, p in db.execute(select(PaymentAllocation, Payment).join(Payment, Payment.id == PaymentAllocation.payment_id)
                                                         .where(PaymentAllocation.order_id == d.id, Payment.cancelled.is_(False)))])
+    if d.kind == "inv" and full and d.status == "open":
+        out["on_account"] = r2(sum(unallocated(p) for p in on_account(db, d.customer_id)))
     if d.kind == "inv":
         if "order_no" not in out:
             o = db.get(SalesDoc, d.order_id) if d.order_id else None
@@ -443,13 +445,89 @@ def pay_out(db: Session, p: Payment, full=False) -> dict:
     rep = db.get(User, p.rep_id)
     out = {"id": p.id, "no": p.no, "date": p.pay_date.isoformat(), "customer_id": c.id, "customer": c.name, "customer_code": c.code,
            "rep": rep.name if rep else "", "rep_id": p.rep_id, "amount": f(p.amount), "mode": p.mode, "mode_label": MODES[p.mode], "ref": p.ref,
-           "cancelled": p.cancelled, "sync": {"status": p.sync_status, "label": SYNC_LABEL[p.sync_status], "no": p.sync_no, "error": p.sync_error}}
+           "cancelled": p.cancelled, "unallocated": unallocated(p),
+           "sync": {"status": p.sync_status, "label": SYNC_LABEL[p.sync_status], "no": p.sync_no, "error": p.sync_error}}
     if full:
         out.update(bank=p.bank, cheque_date=p.cheque_date.isoformat() if p.cheque_date else None, remarks=p.remarks,
                    loc={"lat": f(p.lat), "lng": f(p.lng)} if p.lat is not None else None,
                    allocations=[{"order_id": a.order_id, "order_no": db.get(SalesDoc, a.order_id).no, "amount": f(a.amount),
                                  "kind": db.get(SalesDoc, a.order_id).kind} for a in p.allocations])
     return out
+
+
+def _check_allocs(db: Session, c: Customer, given: list, room: float) -> list:
+    allocs = [a for a in given if a.amount > 0]
+    if r2(sum(a.amount for a in allocs)) > room + 0.001:
+        raise HTTPException(422, "Allocations add up to more than the amount received." if room > 0 else "Nothing of this receipt is left to allocate.")
+    for a in allocs:
+        o = db.get(SalesDoc, a.order_id)
+        ok = o and o.customer_id == c.id and ((o.kind == "inv" and o.status == "open") or (o.kind == "order" and o.status in ("submitted", "approved")))
+        if not ok:
+            raise HTTPException(422, "An allocation is to an invoice or order that is not open for this customer.")
+        due = doc_due(db, o)
+        if a.amount > due + 0.001:
+            raise HTTPException(422, f"{o.no} has only ₹{max(due, 0):,.2f} due.")
+    return allocs
+
+
+def unallocated(p: Payment) -> float:
+    return 0.0 if p.cancelled else r2(float(p.amount) - sum(float(a.amount) for a in p.allocations))
+
+
+def on_account(db: Session, customer_id: int) -> list[Payment]:
+    """The customer's receipts with money not allocated to any invoice or order, oldest first."""
+    rows = db.scalars(select(Payment).where(Payment.customer_id == customer_id, Payment.cancelled.is_(False)).order_by(Payment.pay_date, Payment.id))
+    return [p for p in rows if unallocated(p) > 0.004]
+
+
+class AllocateIn(BaseModel):
+    allocations: list[AllocIn]
+
+
+@router.post("/payments/{pid}/allocate")
+def allocate_payment(pid: int, body: AllocateIn, db: Session = Depends(get_db), me: User = Depends(current_user)):
+    """Allocates the part of a receipt that is still on account (for example to an invoice made later)."""
+    p = get_or_404(db, Payment, pid, "payment")
+    if p.rep_id not in visible_user_ids(db, me) or (me.role == "rep" and p.rep_id != me.id):
+        raise HTTPException(403, "You cannot change this receipt.")
+    if p.cancelled:
+        raise HTTPException(409, "This receipt is cancelled.")
+    allocs = _check_allocs(db, db.get(Customer, p.customer_id), body.allocations, unallocated(p))
+    for a in allocs:
+        hit = next((x for x in p.allocations if x.order_id == a.order_id), None)
+        if hit:
+            hit.amount = r2(float(hit.amount) + a.amount)
+        else:
+            p.allocations.append(PaymentAllocation(order_id=a.order_id, amount=r2(a.amount)))
+    db.commit()
+    return pay_out(db, p, True)
+
+
+@router.post("/docs/{doc_id}/apply-on-account")
+def apply_on_account(doc_id: int, db: Session = Depends(get_db), me: User = Depends(current_user)):
+    """Pays an invoice from the customer's money on account (receipts not allocated in full), oldest first."""
+    d = get_or_404(db, SalesDoc, doc_id, "invoice")
+    if d.rep_id not in visible_user_ids(db, me):
+        raise HTTPException(403, "You cannot change this invoice.")
+    if d.kind != "inv" or d.status != "open":
+        raise HTTPException(409, "Only open invoices can be paid.")
+    room = doc_due(db, d)
+    used = []
+    for p in on_account(db, d.customer_id):
+        if room <= 0.004:
+            break
+        take = r2(min(unallocated(p), room))
+        hit = next((x for x in p.allocations if x.order_id == d.id), None)
+        if hit:
+            hit.amount = r2(float(hit.amount) + take)
+        else:
+            p.allocations.append(PaymentAllocation(order_id=d.id, amount=take))
+        room = r2(room - take)
+        used.append(p.no)
+    if not used:
+        raise HTTPException(422, "This customer has no money on account." if room > 0.004 else "Nothing is due on this invoice.")
+    db.commit()
+    return doc_out(db, d, True)
 
 
 @router.post("/payments")
@@ -467,17 +545,7 @@ def create_payment(body: PaymentIn, db: Session = Depends(get_db), me: User = De
         raise HTTPException(422, "Enter the cheque number.")
     if body.mode in ("upi", "neft", "card") and not body.ref.strip():
         raise HTTPException(422, "Enter the transaction reference.")
-    allocs = [a for a in body.allocations if a.amount > 0]
-    if r2(sum(a.amount for a in allocs)) > amount + 0.001:
-        raise HTTPException(422, "Allocations add up to more than the amount received.")
-    for a in allocs:
-        o = db.get(SalesDoc, a.order_id)
-        ok = o and o.customer_id == c.id and ((o.kind == "inv" and o.status == "open") or (o.kind == "order" and o.status in ("submitted", "approved")))
-        if not ok:
-            raise HTTPException(422, "An allocation is to an invoice or order that is not open for this customer.")
-        due = doc_due(db, o)
-        if a.amount > due + 0.001:
-            raise HTTPException(422, f"{o.no} has only ₹{max(due, 0):,.2f} due.")
+    allocs = _check_allocs(db, c, body.allocations, amount)
     p = Payment(no=next_no(db, "payment", on), customer_id=c.id, rep_id=me.id, pay_date=on, amount=amount, mode=body.mode,
                 ref=body.ref.strip()[:60], bank=body.bank.strip()[:80], cheque_date=parse_date(body.cheque_date, "Cheque date"),
                 remarks=body.remarks.strip()[:300], lat=body.lat, lng=body.lng, sync_status="pending",

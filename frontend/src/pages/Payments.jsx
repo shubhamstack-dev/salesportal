@@ -25,8 +25,24 @@ export function PaymentList({ route }) {
 
 function PaymentView({ id, onClose }) {
   const { settings } = useSession(); const { toast, confirm } = useUi()
-  const [p] = useLoad(() => (id ? api(`/api/payments/${id}`) : Promise.resolve(null)), [id])
+  const [p, reload] = useLoad(() => (id ? api(`/api/payments/${id}`) : Promise.resolve(null)), [id])
+  const [open, setOpen] = useState(null)        // open invoices/orders, while allocating the balance
+  const [alloc, setAlloc] = useState({})
   if (!id) return <Modal open={false} />
+  const startAlloc = async () => {
+    try {
+      const r = await api(`/api/customers/${p.customer_id}/open-orders`)
+      let left = p.unallocated; const a = {}
+      for (const o of r.orders) { if (left <= 0) break; const t = Math.min(o.due, left); a[o.id] = Math.round(t * 100) / 100; left -= t }
+      setOpen(r.orders); setAlloc(a)
+    } catch (e) { toast(e.message) }
+  }
+  const saveAlloc = async () => {
+    try {
+      await api(`/api/payments/${id}/allocate`, { method: 'POST', body: { allocations: Object.entries(alloc).filter(([, v]) => +v > 0).map(([k, v]) => ({ order_id: +k, amount: +v })) } })
+      toast('Allocated'); setOpen(null); reload()
+    } catch (e) { toast(e.message) }
+  }
   const print = () => {
     const co = settings.company
     printDoc(`Receipt ${p.no}`, `<h1 style="margin:0">${esc(co.name)}</h1><div>${esc(co.address)} · GSTIN ${esc(co.gstin || '—')}</div><hr><h2>Payment receipt ${esc(p.no)}</h2><p>Date ${dmy(p.date)}</p>
@@ -42,6 +58,14 @@ function PaymentView({ id, onClose }) {
     <div className="hd" style={{ margin: 0 }}><div><h2>{p.no} · {inr(p.amount)}</h2><p className="fine" style={{ margin: 0 }}>{p.customer} · {dmy(p.date)} · {p.mode_label} {p.ref}</p></div>{p.cancelled ? <span className="badge bad">Cancelled</span> : <Sync x={p.sync} />}</div>
     {p.allocations.length ? <table className="t"><thead><tr><th>Allocated to</th><th className="r">Amount</th></tr></thead><tbody>{p.allocations.map((a) => <tr key={a.order_id}><td className="mono">{a.order_no}</td><td className="r">{inr(a.amount)}</td></tr>)}</tbody></table>
       : <p className="mut">On account (not allocated to an invoice or order).</p>}
+    {!p.cancelled && p.unallocated > 0 && !open && <div className="note warn" style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+      <span style={{ flex: 1 }}><b>{inr(p.unallocated)}</b> is on account (not allocated).{p.sync.status === 'synced' ? ' This receipt is already in Dynamics: apply it to the invoice there as well.' : ''}</span>
+      <button className="btn sm" onClick={startAlloc}>Allocate to invoices</button></div>}
+    {open && <div><table className="t"><thead><tr><th>Invoice / order</th><th className="r">Due</th><th className="r" style={{ width: 130 }}>Allocate</th></tr></thead><tbody>
+      {open.map((o) => <tr key={o.id}><td className="mono">{o.no}<div className="fine">{o.kind === 'inv' ? 'Invoice' : 'Order (advance)'}</div></td><td className="r">{inr(o.due)}</td>
+        <td><input className="inp" style={{ textAlign: 'right' }} inputMode="decimal" value={alloc[o.id] ?? ''} onChange={(e) => setAlloc({ ...alloc, [o.id]: e.target.value })} /></td></tr>)}
+      {!open.length && <tr><td colSpan={3} className="mut">Nothing unpaid for this customer.</td></tr>}</tbody></table>
+      <div className="btns"><button className="btn ghost" onClick={() => setOpen(null)}>Cancel</button><button className="btn pri" disabled={!open.length} onClick={saveAlloc}>Save allocation</button></div></div>}
     <p className="fine">Received by {p.rep} · {p.loc ? <LocLink p={p.loc} /> : 'no location'}{p.remarks && <><br />{p.remarks}</>}</p>
     <div className="btns">{p.can_cancel && <button className="btn danger" onClick={cancel}>Cancel receipt</button>}<button className="btn" onClick={print}>Print receipt</button><button className="btn pri" onClick={onClose}>Close</button></div></div>}</Modal>
 }

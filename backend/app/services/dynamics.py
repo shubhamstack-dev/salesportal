@@ -595,11 +595,63 @@ def order_payload(db: Session, d: SalesDoc) -> dict:
     return {k: v for k, v in body.items() if v is not None}
 
 
+def _same_line(have: dict, want: dict) -> bool:
+    return ((have.get("lineObjectNumber") or "").strip().upper() == want["lineObjectNumber"].strip().upper()
+            and abs(float(have.get("quantity") or 0) - want["quantity"]) < 1e-6
+            and abs(float(have.get("unitPrice") or 0) - want["unitPrice"]) < 0.01
+            and abs(float(have.get("discountPercent") or 0) - want["discountPercent"]) < 0.001)
+
+
+def make_order_from_quote(db: Session, s: dict, token: str, d: SalesDoc, orders_url: str) -> str | None:
+    """Business Central's own flow for an order made from a quotation: Make Order on the quote (the quote becomes the
+    order and leaves the quote list). Lines changed in the portal are then made the same in Business Central.
+    None when the quote is not (or no longer) in Business Central: the order is then created as a new one."""
+    q = db.get(SalesDoc, d.quote_id) if d.quote_id else None
+    if not q or q.sync_status != "synced" or not q.sync_no:
+        return None
+    quotes_url = endpoint_url(s, token, s["dynamics"]["ep"].get("quotes") or "salesQuotes")
+    found = api_call(s, token, f"{quotes_url}?$filter=number eq '{_q(q.sync_no)}'").get("value") or []
+    if not found:
+        return None
+    r = api_call(s, token, f"{quotes_url}({found[0]['id']})/Microsoft.NAV.makeOrder", "POST")
+    order = r if r.get("id") and r.get("number") else None
+    if not order:      # the action answers without a body: the new order carries the quote's External Document No.
+        c = db.get(Customer, d.customer_id)
+        made = [x for x in api_call(s, token, f"{orders_url}?$filter=externalDocumentNumber eq '{_q(q.no)}'").get("value") or []
+                if not x.get("customerNumber") or x.get("customerNumber") == c.code]
+        made.sort(key=lambda x: (x.get("orderDate") or "", x.get("number") or ""))
+        order = made[-1] if made else None
+    if not order:
+        raise HTTPException(502, f"Dynamics made an order from quote {q.sync_no}, but it was not found. Check Sales Orders there.")
+    oid, want = order["id"], order_payload(db, d)["salesOrderLines"]
+    have = [x for x in api_call(s, token, f"{orders_url}({oid})/salesOrderLines").get("value", []) if x.get("lineType") == "Item"]
+    if len(have) != len(want) or not all(_same_line(h, w) for h, w in zip(have, want)):
+        for x in have:
+            api_call(s, token, f"{orders_url}({oid})/salesOrderLines({x['id']})", "DELETE", headers={"If-Match": "*"})
+        for w in want:
+            api_call(s, token, f"{orders_url}({oid})/salesOrderLines", "POST", w)
+    head = {"externalDocumentNumber": d.no}
+    if d.delivery_date:
+        head["requestedDeliveryDate"] = d.delivery_date.isoformat()
+    api_call(s, token, f"{orders_url}({oid})", "PATCH", head, headers={"If-Match": "*"})
+    return str(order["number"])
+
+
+def _q(v: str) -> str:
+    return quote(str(v).replace("'", "''"), safe="")
+
+
 def send_doc(db: Session, s: dict, token: str, d: SalesDoc, path: str) -> None:
-    """Creates one quotation or sales order in Dynamics and records the result on the document.
-    If Dynamics does not know the employee code as a salesperson, the document is sent without one rather than lost."""
+    """Creates one quotation or sales order in Dynamics and records the result on the document. An order made from a
+    quotation that is in Dynamics comes from that quote (Make Order). If Dynamics does not know the employee code as a
+    salesperson, the document is sent without one rather than lost."""
     body = order_payload(db, d)
     try:
+        if d.kind == "order":
+            no = make_order_from_quote(db, s, token, d, path)
+            if no:
+                d.sync_status, d.sync_no, d.sync_at, d.sync_error = "synced", no[:40], now_utc(), None
+                return
         try:
             r = api_call(s, token, path, "POST", body)
         except HTTPException as e:
@@ -709,26 +761,50 @@ class PostError(Exception):
     pass
 
 
-def _q(v: str) -> str:
-    return quote(v.replace("'", "''"), safe="")
+EXT_PATH = "api/samuraiFoods/portal/v1.0"      # the Samurai Sales Portal extension for Business Central (bc-extension folder)
+LOT_HINT = ("Business Central needs lot numbers for this item. Install the Samurai Sales Portal extension (it assigns lots "
+            "first-expiry-first-out when posting), or assign the lots on the order in Business Central and post it there; "
+            "then press Post in Dynamics here to link the posted invoice.")
 
 
-def post_invoice_in_bc(db: Session, s: dict, token: str, inv: SalesDoc) -> str:
-    """For an invoice made here, posts its sales order in Business Central (Ship and Invoice) for exactly the invoiced
-    quantities, and returns the number of the posted sales invoice Business Central made.
+def _ext_url(s: dict, path: str) -> str:
+    """The same company in the extension's API: .../api/v2.0/companies(x) -> .../api/samuraiFoods/portal/v1.0/companies(x)"""
+    base = (s["dynamics"].get("base_url") or "").rstrip("/")
+    m = re.match(r"^(https?://.+?)/api/[^/]+(?:/[^/]+/[^/]+)?/(companies\([^)]+\))$", base) or re.match(r"^(https?://.+?)/api/v2\.0/(companies\([^)]+\))$", base)
+    if not m:
+        raise PostError("The API address must end in /api/v2.0/companies(<company id>) to post invoices.")
+    return f"{m[1]}/{EXT_PATH}/{m[2]}/{path}"
 
-    1. find the Business Central order by the number it got when it was sent (salesOrders?$filter=number eq ...)
-    2. on each of its item lines set Qty. to Ship and Qty. to Invoice: this invoice's quantity, 0 for the rest
-    3. Microsoft.NAV.shipAndInvoice
-    4. read the posted invoice: salesInvoices?$filter=orderNumber eq ..., the newest one not already on another invoice here"""
-    from ..models import SalesDoc as SD
-    order = db.get(SD, inv.order_id) if inv.order_id else None
+
+def _posted_for(s: dict, token: str, order_no: str) -> list[dict]:
+    inv_ep = s["dynamics"]["ep"].get("invoices") or "salesInvoices"
+    rows = api_call(s, token, f"{endpoint_url(s, token, inv_ep)}?$filter=orderNumber eq '{_q(order_no)}'").get("value") or []
+    rows.sort(key=lambda x: (x.get("postingDate") or x.get("invoiceDate") or "", x.get("lastModifiedDateTime") or "", x.get("number") or ""))
+    return rows
+
+
+def post_invoice_in_bc(db: Session, s: dict, token: str, inv: SalesDoc) -> tuple[str, str]:
+    """Posts the invoice's sales order in Business Central for exactly the invoiced quantities and returns
+    (posted invoice number, how). Business Central's flow:
+      0. an invoice already posted in Business Central for this order (lots assigned and posted there by hand) and not
+         yet linked to a portal invoice is linked instead of posting again
+      1. find the order; check its item lines are the portal's
+      2. posting date = the invoice date; Qty. to Ship and Qty. to Invoice = this invoice's quantity (0 on other lines)
+      3. post: with the Samurai Sales Portal extension, lot numbers are assigned FEFO and the order posted (Ship and
+         Invoice) in one go; without it, the standard Ship and Invoice action (fine for items without lot tracking)
+      4. read the posted invoice number back"""
+    order = db.get(SalesDoc, inv.order_id) if inv.order_id else None
     if not order:
         raise PostError("This invoice has no sales order.")
     if order.sync_status != "synced" or not order.sync_no:
         raise PostError(f"Order {order.no} is not in Dynamics yet. Send it (Dynamics sync, Send via API), then Post in Dynamics.")
-    ep = s["dynamics"]["ep"].get("orders") or "salesOrders"
-    base = endpoint_url(s, token, ep)
+    taken = {x.sync_no for x in db.scalars(select(SalesDoc).where(SalesDoc.kind == "inv", SalesDoc.order_id == order.id,
+                                                                   SalesDoc.id != inv.id, SalesDoc.status != "cancelled")) if x.sync_no}
+    before = _posted_for(s, token, order.sync_no)
+    loose = [x for x in before if x.get("number") and x["number"] not in taken]
+    if loose:                                    # posted in Business Central already: link it
+        return loose[0]["number"], "linked"
+    base = endpoint_url(s, token, s["dynamics"]["ep"].get("orders") or "salesOrders")
     found = api_call(s, token, f"{base}?$filter=number eq '{_q(order.sync_no)}'").get("value") or []
     if not found:
         raise PostError(f"Dynamics has no open sales order {order.sync_no}; it may already be fully invoiced or deleted there.")
@@ -746,18 +822,27 @@ def post_invoice_in_bc(db: Session, s: dict, token: str, inv: SalesDoc) -> str:
         if q > left + 0.00001:
             raise PostError(f"{ol.material_code}: Dynamics has only {left:g} left to invoice on {order.sync_no}, the invoice has {q:g}.")
         plan.append((bl, q))
+    api_call(s, token, f"{base}({bc_id})", "PATCH", {"postingDate": inv.doc_date.isoformat()}, headers={"If-Match": "*"})
     for bl, q in plan:
         api_call(s, token, f"{base}({bc_id})/salesOrderLines({bl['id']})", "PATCH",
                  {"shipQuantity": q, "invoiceQuantity": q}, headers={"If-Match": bl.get("@odata.etag") or "*"})
-    api_call(s, token, f"{base}({bc_id})/Microsoft.NAV.shipAndInvoice", "POST")
-    inv_ep = s["dynamics"]["ep"].get("invoices") or "salesInvoices"
-    posted = api_call(s, token, f"{endpoint_url(s, token, inv_ep)}?$filter=orderNumber eq '{_q(order.sync_no)}'").get("value") or []
-    taken = {x.sync_no for x in db.scalars(select(SD).where(SD.kind == "inv", SD.order_id == order.id, SD.id != inv.id)) if x.sync_no}
-    fresh = [x for x in posted if x.get("number") and x["number"] not in taken]
+    how = "lots assigned (FEFO) and posted"
+    try:
+        api_call(s, token, _ext_url(s, f"portalSalesOrders({bc_id})/Microsoft.NAV.assignLotsAndPost"), "POST")
+    except HTTPException as e:
+        if " 404" not in str(e.detail) and "No HTTP resource" not in str(e.detail) and "not found" not in str(e.detail).lower():
+            raise
+        how = "posted"                            # extension not installed: the standard action
+        try:
+            api_call(s, token, f"{base}({bc_id})/Microsoft.NAV.shipAndInvoice", "POST")
+        except HTTPException as e2:
+            if re.search(r"lot (number|no)", str(e2.detail), re.I):
+                raise PostError(f"{e2.detail} {LOT_HINT}")
+            raise
+    fresh = [x for x in _posted_for(s, token, order.sync_no) if x.get("number") and x["number"] not in taken]
     if not fresh:
         raise PostError(f"Order {order.sync_no} was posted in Dynamics, but its posted invoice was not found. Check Posted Sales Invoices there.")
-    fresh.sort(key=lambda x: (x.get("postingDate") or x.get("invoiceDate") or "", x.get("lastModifiedDateTime") or "", x["number"]))
-    return fresh[-1]["number"]
+    return fresh[-1]["number"], how
 
 
 def post_invoice(doc_id: int) -> None:
@@ -771,9 +856,10 @@ def post_invoice(doc_id: int) -> None:
             return
         s = get_settings(db)
         try:
-            no = post_invoice_in_bc(db, s, access_token(s), inv)
+            no, how = post_invoice_in_bc(db, s, access_token(s), inv)
             inv.sync_status, inv.sync_no, inv.sync_error, inv.sync_at = "synced", no[:40], None, now_utc()
-            db.add(SyncLog(direction="out", entity="Sales invoice", count=1, status="ok", message=f"{inv.no}: order posted in Dynamics, invoice {no}"))
+            msg = f"linked to invoice {no} posted in Dynamics" if how == "linked" else f"order {how} in Dynamics, invoice {no}"
+            db.add(SyncLog(direction="out", entity="Sales invoice", count=1, status="ok", message=f"{inv.no}: {msg}"))
         except (PostError, HTTPException) as e:
             msg = str(e.detail if isinstance(e, HTTPException) else e)
             inv.sync_status, inv.sync_error, inv.sync_at = "error", msg[:500], now_utc()
@@ -781,3 +867,21 @@ def post_invoice(doc_id: int) -> None:
         except Exception as e:  # noqa: BLE001
             inv.sync_status, inv.sync_error, inv.sync_at = "error", f"Posting failed: {e}"[:500], now_utc()
         db.commit()
+
+
+def payment_api_lines(db: Session, p: Payment, negative: bool) -> list[dict]:
+    """Customer payment journal lines for one receipt, applied as in Business Central: one line per invoice that is
+    posted there (Applies-to Doc. No. = its posted invoice number), and one line for the rest (on account / advances)."""
+    c = db.get(Customer, p.customer_id)
+    sign = -1 if negative else 1
+    base = {"customerNumber": c.code, "postingDate": p.pay_date.isoformat(), "documentNumber": p.no,
+            "externalDocumentNumber": p.ref or p.no, "description": f"{p.mode.upper()} {p.ref}".strip()[:100]}
+    lines, rest = [], float(p.amount)
+    for a in p.allocations:
+        d = db.get(SalesDoc, a.order_id)
+        if d and d.kind == "inv" and d.sync_status == "synced" and d.sync_no:
+            lines.append({**base, "amount": round(sign * float(a.amount), 2), "appliesToInvoiceNumber": d.sync_no})
+            rest -= float(a.amount)
+    if rest > 0.004 or not lines:
+        lines.append({**base, "amount": round(sign * rest, 2)})
+    return lines

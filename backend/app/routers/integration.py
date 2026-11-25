@@ -272,10 +272,8 @@ def push(db: Session = Depends(get_db), me: User = Depends(admin)):
                     ok += 1
                     continue
                 elif kind == "payments":
-                    c = db.get(Customer, x.customer_id)
-                    r = D.api_call(s, token, path, "POST", {"customerNumber": c.code, "postingDate": x.pay_date.isoformat(), "documentNumber": x.no,
-                                                           "externalDocumentNumber": x.ref or x.no, "amount": -float(x.amount) if s["dynamics"]["payments_negative"] else float(x.amount),
-                                                           "description": f"{x.mode.upper()} {x.ref}".strip()})
+                    for line in D.payment_api_lines(db, x, s["dynamics"]["payments_negative"]):
+                        r = D.api_call(s, token, path, "POST", line)
                     no = r.get("documentNumber") or x.no
                 else:
                     for line in D.expense_lines(db, x):
