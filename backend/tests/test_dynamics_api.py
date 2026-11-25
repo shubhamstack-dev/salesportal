@@ -222,6 +222,9 @@ def fake_request(method, url, json=None, headers=None, **kw):
                 return _json(400, {"error": {"message": f"Not enough stock with lot numbers for item {l['lineObjectNumber']} at location LKO: {need:g} short."}})
             l["lots"] = True
         return bc_orders("POST", f"{BASE}/salesOrders({o['id']})/Microsoft.NAV.shipAndInvoice", "", None, {})
+    if method == "GET" and path == f"{BASE}/customerPaymentJournals":
+        return _json(200, {"value": [{"id": "j-cash-1", "code": "CASHRCPT", "displayName": "Cash receipts"},
+                                     {"id": "j-bank-2", "code": "BANK", "displayName": "Bank receipts"}]})
     if method == "POST" and path.endswith("/customerPayments"):
         BC_PAYMENTS.append(json)
         return _json(201, {**json, "id": f"pay-{len(BC_PAYMENTS)}"})
@@ -766,3 +769,20 @@ def test_extension_assigns_lots_first_expiry_first_out(c):
     inv2 = c.post(f"/api/docs/{o2['id']}/invoice", json={}).json()
     assert "Not enough stock with lot numbers" in c.get(f"/api/docs/{inv2['id']}").json()["sync"]["error"]
     BC_EXT["installed"] = False
+
+
+
+def test_find_payment_journals_and_warn_without_endpoint(c):
+    connect(c, payments="")
+    ids = {x["code"]: x["id"] for x in c.get("/api/customers").json()}
+    from app.services.common import local_today
+    c.post("/api/payments", json={"customer_id": ids["C0001"], "date": local_today().isoformat(), "amount": 100, "mode": "cash", "ref": "", "allocations": []})
+    r = c.post("/api/integration/push").json()
+    assert "payments" in r["skipped"]
+    log = c.get("/api/integration/summary").json()["log"][0]
+    assert "no endpoint set: payments" in log["message"] and log["status"] == "error"
+    j = c.get("/api/integration/payment-journals").json()["journals"]
+    assert j[0] == {"id": "j-cash-1", "code": "CASHRCPT", "name": "Cash receipts", "endpoint": "customerPaymentJournals(j-cash-1)/customerPayments"}
+    connect(c, payments=j[0]["endpoint"])
+    BC_PAYMENTS.clear()
+    assert c.post("/api/integration/push").json()["skipped"] == [] and len(BC_PAYMENTS) >= 1

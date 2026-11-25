@@ -171,6 +171,16 @@ def company(db: Session = Depends(get_db), me: User = Depends(admin)):
     return got
 
 
+@router.get("/payment-journals")
+def payment_journals(db: Session = Depends(get_db), _=Depends(admin)):
+    """Business Central's customer payment (cash receipt) journals, to choose where payments go."""
+    s = get_settings(db)
+    token = D.access_token(s)
+    rows = D.api_call(s, token, "customerPaymentJournals").get("value") or []
+    return {"journals": [{"id": x.get("id"), "code": x.get("code"), "name": x.get("displayName") or "",
+                          "endpoint": f"customerPaymentJournals({x.get('id')})/customerPayments"} for x in rows if x.get("id")]}
+
+
 @router.get("/services")
 def services(db: Session = Depends(get_db), _=Depends(admin)):
     """What is published under Web Services in Business Central, to fill in odata: endpoints."""
@@ -284,9 +294,11 @@ def push(db: Session = Depends(get_db), me: User = Depends(admin)):
             except HTTPException as e:
                 x.sync_status, x.sync_error, x.sync_at = "error", str(e.detail)[:500], now_utc()
                 bad += 1
-    log(db, "out", "Quotations, orders, payments, expenses", ok, "error" if bad else "ok", f"API: {ok} sent, {bad} failed", me)
+    skipped = [k for k, path in targets if not path and q[k]]
+    note = f"; not sent, no endpoint set: {', '.join(skipped)}" if skipped else ""
+    log(db, "out", "Quotations, orders, payments, expenses", ok, "error" if bad or skipped else "ok", f"API: {ok} sent, {bad} failed{note}", me)
     db.commit()
-    return {"sent": ok, "failed": bad}
+    return {"sent": ok, "failed": bad, "skipped": skipped}
 
 
 @router.post("/test")

@@ -32,7 +32,7 @@ export default function Integration() {
   }
   const exportOut = async () => { try { await download('/api/integration/export', `To_Dynamics_${new Date().toISOString().slice(0, 10)}.xlsx`, { method: 'POST' }); toast('Exported. Import the Dynamics numbers back when they are posted.'); after() } catch (e) { toast(e.message) } }
   const push = async () => { if (!(await confirm('Send to Dynamics now?', 'Quotations, approved orders, payments and approved expense claims are posted to the Dynamics API.', 'Send'))) return
-    try { const r = await api('/api/integration/push', { method: 'POST' }); toast(`${r.sent} sent${r.failed ? `, ${r.failed} failed (see each document)` : ''}`); after() } catch (e) { toast(e.message) } }
+    try { const r = await api('/api/integration/push', { method: 'POST' }); toast(`${r.sent} sent${r.failed ? `, ${r.failed} failed (see each document)` : ''}${r.skipped?.length ? `. Not sent: ${r.skipped.join(', ')} (no endpoint set under Dynamics connection${r.skipped.includes('payments') ? ': use Find payment journals' : ''})` : ''}`); after() } catch (e) { toast(e.message) } }
   const ack = async (file) => { const form = new FormData(); form.append('file', file)
     try { const r = await api('/api/integration/ack', { method: 'POST', form }); toast(`${r.matched} documents marked as in Dynamics${r.unknown ? `; ${r.unknown} not found` : ''}`); after() } catch (e) { toast(e.message) } }
   if (!s) return <div className="loading">Loading…</div>
@@ -105,6 +105,13 @@ function Connection() {
   const { toast } = useUi(); const { reloadMe } = useSession()
   const [s, reload] = useLoad(() => api('/api/settings'), [])
   const [svc, setSvc] = useState(null)
+  const [jr, setJr] = useState(null)
+  const findJournals = async () => { try { const r = await api('/api/integration/payment-journals'); setJr(r.journals) } catch (e) { toast(e.message) } }
+  const pickJournal = (j) => {
+    const el = document.querySelector('input[name=ep_payments]')
+    if (el) el.value = j.endpoint
+    toast(`Payments endpoint set to journal ${j.code}. Click Save connection.`)
+  }
   if (!s) return null
   const d = s.dynamics
   const save = async (e) => {
@@ -126,6 +133,10 @@ function Connection() {
       <label className="field">Scope<input className="inp" name="scope" defaultValue={d.scope} /></label>
       <label className="field wide">Or a pasted access token (expires; for testing only)<input className="inp" name="token" type="password" defaultValue={d.token} autoComplete="off" /></label>
       {Object.entries(d.ep).map(([k, v]) => <label key={k} className="field">{EPLABEL[k] || k} endpoint<input className="inp" name={'ep_' + k} defaultValue={v} list="odataSvc" placeholder={EPHINT[k]} /></label>)}
+      <div className="field wide"><span>Payments go to this Business Central cash receipt journal</span>
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', alignItems: 'center' }}><button type="button" className="btn sm" onClick={findJournals}>Find payment journals</button>
+          {(jr || []).map((j) => <button type="button" key={j.id} className="btn sm" onClick={() => pickJournal(j)}><b>{j.code}</b>&nbsp;{j.name}</button>)}
+          {jr && !jr.length && <span className="fine">No cash receipt journal batch in Business Central. Make one (Cash Receipt Journals → Batch), then try again.</span>}</div></div>
       <datalist id="odataSvc">{(svc || []).map((x) => <option key={x.name} value={'odata:' + x.name} />)}</datalist>
       <label className="chk wide"><input type="checkbox" name="auto_push" defaultChecked={d.auto_push} /> <span><b>Send quotations and sales orders to Dynamics automatically</b> as soon as a quotation is saved or an order is approved, through the Quotations and Sales orders endpoints. If Dynamics cannot be reached, the document stays under "To Dynamics" with its error, for Send via API.</span></label>
       <label className="chk wide"><input type="checkbox" name="post_invoices" defaultChecked={d.post_invoices} /> <span><b>Post the sales order in Dynamics when an invoice is made here</b> (Ship and Invoice, for the invoiced quantities only). The posted invoice number from Dynamics comes back onto the portal invoice. The order must already be in Dynamics. Items with lot numbers need the <b>Samurai Sales Portal Connector</b> extension in Business Central (bc-extension folder; it assigns lots earliest-expiry-first); without it, assign the lots and post in Business Central, then press <b>Post in Dynamics</b> on the invoice to link it.</span></label>
