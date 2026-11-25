@@ -869,8 +869,10 @@ def post_invoice(doc_id: int) -> None:
         db.commit()
 
 
-def payment_api_lines(db: Session, p: Payment, negative: bool) -> list[dict]:
-    """Customer payment journal lines for one receipt, applied as in Business Central: one line per invoice that is
+def payment_api_lines(db: Session, p: Payment, negative: bool = False) -> list[dict]:
+    """The Business Central customerPayments API takes a payment received as a POSITIVE amount and negates it on the
+    journal line itself, so the API always gets positive amounts (negative=True only for other targets).
+Customer payment journal lines for one receipt, applied as in Business Central: one line per invoice that is
     posted there (Applies-to Doc. No. = its posted invoice number), and one line for the rest (on account / advances)."""
     c = db.get(Customer, p.customer_id)
     sign = -1 if negative else 1

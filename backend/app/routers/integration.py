@@ -282,7 +282,7 @@ def push(db: Session = Depends(get_db), me: User = Depends(admin)):
                     ok += 1
                     continue
                 elif kind == "payments":
-                    for line in D.payment_api_lines(db, x, s["dynamics"]["payments_negative"] or "custpaymentjournal" in path.lower().replace("customerpaymentjournal", "custpaymentjournal")):
+                    for line in D.payment_api_lines(db, x, False):
                         r = D.api_call(s, token, path, "POST", line)
                     no = r.get("documentNumber") or x.no
                 else:
