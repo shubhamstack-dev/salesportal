@@ -786,3 +786,15 @@ def test_find_payment_journals_and_warn_without_endpoint(c):
     connect(c, payments=j[0]["endpoint"])
     BC_PAYMENTS.clear()
     assert c.post("/api/integration/push").json()["skipped"] == [] and len(BC_PAYMENTS) >= 1
+
+
+def test_journal_payments_always_negative(c):
+    connect(c, payments="customerPaymentJournals(j-cash-1)/customerPayments")
+    s = c.get("/api/settings").json()["dynamics"]; s["payments_negative"] = False
+    c.put("/api/settings", json={"dynamics": s})
+    ids = {x["code"]: x["id"] for x in c.get("/api/customers").json()}
+    from app.services.common import local_today
+    c.post("/api/payments", json={"customer_id": ids["C0001"], "date": local_today().isoformat(), "amount": 250, "mode": "cash", "ref": "", "allocations": []})
+    BC_PAYMENTS.clear()
+    c.post("/api/integration/push")
+    assert BC_PAYMENTS and all(x["amount"] < 0 for x in BC_PAYMENTS), BC_PAYMENTS
