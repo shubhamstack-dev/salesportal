@@ -970,3 +970,36 @@ def test_new_customer_gst_step_fails_then_finishes_without_a_second_customer(c):
     assert r.status_code == 200, r.text
     assert len(BC_NEW_CUST) == n + 1 and BC_NEW_CUST[n]["GST_Registration_No"] == "09AFUFS4116C1ZT" and BC_NEW_CUST[n]["GST_Customer_Type"] == "Registered"
     assert r.json()["code"] == no and r.json()["sync"]["status"] == "synced"
+
+
+def test_masters_download_by_themselves(c, monkeypatch):
+    from app.services import scheduler
+    from app.db import SessionLocal
+    from app.services.common import put_settings
+    connect(c, customers="odata:Customer_Card", materials="odata:Item_Card", stock="")
+    assert c.put("/api/integration/auto-pull", json={"minutes": 7}).status_code == 422
+    assert c.put("/api/integration/auto-pull", json={"minutes": 0}).json()["minutes"] == 0
+    assert scheduler.run_once() is None                                   # off
+    c.put("/api/integration/auto-pull", json={"minutes": 5})
+    with SessionLocal() as db:
+        put_settings(db, {"auto_pull": {"at": "2000-01-01T00:00:00Z"}}); db.commit()
+    before = c.get("/api/customers?view=all").json()
+    CUSTOMERS.append({"No": "C0555", "Name": "Auto Synced Mart", "City": "Agra", "State_Code": "UP", "GST_Registration_No": "", "Blocked": " "})
+    try:
+        r = scheduler.run_once()
+        assert r and r["ok"] >= 2 and not {"Customers", "Materials"} & {e[0] for e in r["errors"]}, r
+        assert "C0555" in {x["code"] for x in c.get("/api/customers?view=all").json()} and len(c.get("/api/customers?view=all").json()) == len(before) + 1
+        assert scheduler.run_once() is None                               # not due again yet
+        auto = c.get("/api/integration/summary").json()["auto"]
+        assert auto["minutes"] == 5 and auto["at"] and auto["errors"] == r["errors"]
+        # a failure: one line in the log, not one every 5 minutes; and one when it is fine again
+        connect(c, customers="odata:Customer_Card", materials="odata:No_Such_Page", stock="")
+        n = lambda: len([x for x in c.get("/api/integration/summary").json()["log"] if x["entity"] == "Masters (automatic)"])
+        k = n()
+        assert "Materials" in {e[0] for e in scheduler.run_once(force=True)["errors"]}
+        assert scheduler.run_once(force=True)["errors"]
+        assert n() == k + 1
+        connect(c, customers="odata:Customer_Card", materials="odata:Item_Card", stock="")
+        assert "Materials" not in {e[0] for e in scheduler.run_once(force=True)["errors"]} and n() == k + 2
+    finally:
+        CUSTOMERS.pop()

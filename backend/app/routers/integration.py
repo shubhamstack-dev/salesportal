@@ -7,6 +7,7 @@ from ..db import get_db
 from ..models import (Charge, Customer, ExpenseClaim, HsnCode, Material, MaterialAttribute, Payment, Price, SalesDoc, StockEntry, SyncLog, User)
 from ..security import require
 from ..services import dynamics as D
+from ..services.common import log as _log
 from ..services.common import get_settings, iso_utc, log, now_utc, put_settings
 from ..services.xl import workbook, xlsx_response
 
@@ -108,6 +109,14 @@ def apply(ent: str, body: MapIn, db: Session = Depends(get_db), me: User = Depen
 @router.post("/pull-all")
 def pull_all(db: Session = Depends(get_db), me: User = Depends(admin)):
     """Downloads every master that has an API endpoint, in dependency order, with the remembered columns."""
+    return {"results": run_pull_all(db, me)}
+
+
+def run_pull_all(db: Session, me: User | None, quiet: bool = False) -> list[dict]:
+    """Also run by the automatic download (me None, quiet: nothing in the sync log; it writes its own line)."""
+    def log(db, *a):
+        if not quiet:
+            _log(db, *a)
     s = get_settings(db)
     token, cache, out, items = None, {}, [], None
     for ent in D.PULL_ORDER:
@@ -158,7 +167,7 @@ def pull_all(db: Session = Depends(get_db), me: User = Depends(admin)):
         s = get_settings(db)
         out.append({"entity": ent, "label": label, "status": "warning" if res["skipped"] else "ok", "added": res["added"], "updated": res["updated"],
                     "skipped": res["skipped"], "errors": res["errors"][:5], "item_prices": res.get("item_prices", 0)})
-    return {"results": out}
+    return out
 
 
 @router.post("/company")
@@ -206,6 +215,7 @@ def summary(db: Session = Depends(get_db), _=Depends(admin)):
               "stock": db.query(StockEntry).count()}
     return {"masters": [{"entity": k, "label": v["label"], "count": counts[k], "last": s.get("sync_info", {}).get(k),
                          "api": bool(s["dynamics"]["ep"].get(k))} for k, v in D.ENT.items()],
+            "auto": {"minutes": int(s["dynamics"].get("auto_pull_minutes") or 0), **{k: (s.get("auto_pull") or {}).get(k) for k in ("at", "errors", "running")}},
             "out": {"customers": {"count": len(q["customers"]), "value": 0},
                     "quotes": {"count": len(q["quotes"]), "value": sum(float(x.total) for x in q["quotes"])},
                     "orders": {"count": len(q["orders"]), "value": sum(float(x.total) for x in q["orders"])},
@@ -323,3 +333,18 @@ def test(db: Session = Depends(get_db), _=Depends(admin)):
     ep = D.endpoint_url(s, token, s["dynamics"]["ep"].get("customers") or "customers")
     b = D.api_call(s, token, ep + ("&" if "?" in ep else "?") + "$top=1")
     return {"ok": True, "rows": len(b.get("value", [])), "company": company.get("name") or company.get("displayName") or ""}
+
+
+class AutoIn(BaseModel):
+    minutes: int
+
+
+@router.put("/auto-pull")
+def set_auto_pull(b: AutoIn, db: Session = Depends(get_db), me: User = Depends(admin)):
+    """How often the masters are downloaded by themselves (0 = never)."""
+    if b.minutes not in (0, 5, 10, 15, 30, 60, 120, 240):
+        raise HTTPException(422, "Choose 5, 10, 15, 30, 60, 120 or 240 minutes, or off.")
+    put_settings(db, {"dynamics": {"auto_pull_minutes": b.minutes}})
+    log(db, "in", "Masters (automatic)", 0, "ok", f"Automatic download {'every ' + str(b.minutes) + ' minutes' if b.minutes else 'turned off'}", me)
+    db.commit()
+    return {"minutes": b.minutes}

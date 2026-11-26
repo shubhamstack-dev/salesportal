@@ -42,6 +42,11 @@ export default function Integration() {
     <div className="grid g2">
       <div className="card"><div className="hd"><div><h2>1. From Dynamics: masters</h2><p className="sub">Download customers and materials before prices and attributes. Records are matched by their Dynamics number; prices and charges are replaced as a whole.</p></div>
         <button className="btn pri" disabled={!s.masters.some((m) => m.api)} onClick={pullAll}>Download all via API</button></div>
+        <div className="sync" style={{ marginBottom: 10 }}><div className="meta"><b>Download by itself</b>
+          <span className="fine">{s.auto.minutes ? <>Every {s.auto.minutes} minutes, every master with an endpoint{s.auto.at ? <> · last {s.auto.running ? 'started' : 'ran'} {dt(s.auto.at)}</> : ' · not run yet'}</> : 'Off: only when you press Download'}</span>
+          {s.auto.errors?.length > 0 && <span className="fine" style={{ color: 'var(--bad, #b42318)' }}>Last run failed for {s.auto.errors.map((e) => e[0]).join(', ')}: {s.auto.errors[0][1]}</span>}</div>
+          <select className="inp" value={s.auto.minutes} onChange={async (e) => { try { await api('/api/integration/auto-pull', { method: 'PUT', body: { minutes: +e.target.value } }); toast(+e.target.value ? `Masters download every ${e.target.value} minutes` : 'Automatic download off'); reload() } catch (e2) { toast(e2.message) } }}>
+            {[0, 5, 10, 15, 30, 60, 120, 240].map((x) => <option key={x} value={x}>{x ? `Every ${x} minutes` : 'Off'}</option>)}</select></div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>{s.masters.map((m) => <div key={m.entity} className="sync"><div className="meta"><b>{m.label}</b><span className="fine">{m.count} in the portal · {m.last ? 'downloaded ' + dt(m.last) : 'not downloaded yet'}</span></div>
           <button className="btn sm" onClick={() => pickFile(m.entity)}>Import file</button><button className="btn sm" disabled={!m.api} title={m.api ? '' : 'Set its endpoint under Dynamics connection'} onClick={() => pull(m.entity)}>Download via API</button>
           <button className="btn ghost sm" onClick={() => download(`/api/integration/template/${m.entity}`, `Template_${m.entity}.xlsx`)}>Template</button></div>)}</div></div>

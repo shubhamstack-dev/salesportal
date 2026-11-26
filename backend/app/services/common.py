@@ -39,7 +39,7 @@ DEFAULT_SETTINGS = {
     "dynamics": {"product": "bc", "base_url": "", "token": "", "tenant_id": "", "client_id": "", "client_secret": "",
                  "scope": "https://api.businesscentral.dynamics.com/.default", "payments_negative": True,
                  "api_map": {}, "gst_rates": {}, "auto_push": False, "post_invoices": False,
-                 "pack_uom": "PACKET", "stock_minutes": 15, "new_customer_template": "", "auto_customers": True, "ep": {"company": "companyInformation", "customers": "customers", "materials": "items", "units": "", "attributes": "", "prices": "", "hsn": "", "charges": "", "stock": "",
+                 "pack_uom": "PACKET", "stock_minutes": 15, "auto_pull_minutes": 5, "new_customer_template": "", "auto_customers": True, "ep": {"company": "companyInformation", "customers": "customers", "materials": "items", "units": "", "attributes": "", "prices": "", "hsn": "", "charges": "", "stock": "",
                         "quotes": "salesQuotes", "orders": "salesOrders", "invoices": "salesInvoices", "payments": "", "expenses": ""}},
 }
 SECRET_KEYS = ("token", "client_secret")

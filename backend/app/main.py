@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from .services import scheduler
 from .db import add_missing_columns, CORS_ORIGINS, Base, engine
 from .routers import attendance, auth, dashboard, expenses, integration, masters, microsoft, org, sales, stock
 
@@ -12,6 +13,7 @@ from .routers import attendance, auth, dashboard, expenses, integration, masters
 async def lifespan(_app):
     Base.metadata.create_all(engine)    # creates missing tables; database/schema.sql has the same structure
     add_missing_columns()               # and columns added by later versions to existing tables
+    scheduler.start()                   # automatic download of the masters from Dynamics
     yield
 
 
