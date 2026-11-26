@@ -763,7 +763,27 @@ def _odata_eq(field: str, v: str) -> str:
     return f"$filter={field} eq '{_q(v)}'"
 
 
-def customer_card_body(s: dict, c: Customer, fields: dict, template: dict | None) -> dict:
+def bc_state(s: dict, token: str, url: str, fields: dict, code: str) -> str:
+    """The portal keeps the GST state code (09); Business Central's State table has its own codes (UP, U.P., ...).
+    Learnt from the customers already there: the State Code used by customers in that GST state."""
+    sf, gf = fields.get("state"), fields.get("gstin")
+    if not code or not sf:
+        return code
+    try:
+        rows = api_call(s, token, f"{url}?$select={sf}{',' + gf if gf else ''}").get("value") or []
+    except HTTPException:
+        rows = []
+    seen = {}
+    for r in rows:
+        v = _s(r.get(sf))
+        if v and _state(v, _s(r.get(gf)) if gf else "") == code:
+            seen[v] = seen.get(v, 0) + 1
+    if seen:
+        return max(seen, key=seen.get)
+    return next((a for a, k in STATE_ABBR.items() if k == code and len(a) == 2), code)
+
+
+def customer_card_body(s: dict, c: Customer, fields: dict, template: dict | None, state: str | None = None) -> dict:
     """The new customer as Customer Card fields: the template customer's posting setup first, then this customer."""
     body = {}
     for k, v in (template or {}).items():
@@ -771,7 +791,7 @@ def customer_card_body(s: dict, c: Customer, fields: dict, template: dict | None
             body[k] = v
     addr = (c.address or "").replace("\n", ", ")
     vals = {"name": c.name[:100], "contact": (c.contact or "")[:100], "address": addr[:100], "address2": addr[100:150], "city": (c.city or "")[:30],
-            "pin": (c.pin or "")[:20], "state": c.state or "", "gstin": c.gstin or "", "phone": (c.phone or "")[:30], "email": (c.email or "")[:80],
+            "pin": (c.pin or "")[:20], "state": state if state is not None else (c.state or ""), "gstin": c.gstin or "", "phone": (c.phone or "")[:30], "email": (c.email or "")[:80],
             "price_group": c.price_group or "", "terms": c.terms or ""}
     for k, v in vals.items():
         if v and fields.get(k):
@@ -809,7 +829,7 @@ def send_customer(db: Session, s: dict, token: str, c: Customer) -> str:
             for k in list(fields):
                 if fields[k] not in known:
                     fields[k] = next((a for a in CARD_ALT.get(k, []) if a in known), None)
-        body = customer_card_body(s, c, fields, template)
+        body = customer_card_body(s, c, fields, template, bc_state(s, token, url, fields, c.state or ""))
         if known:
             body = {k: v for k, v in body.items() if k in known}
         r = api_call(s, token, url, "POST", body)

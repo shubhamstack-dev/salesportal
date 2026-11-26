@@ -251,6 +251,8 @@ def fake_request(method, url, json=None, headers=None, **kw):
         return _json(200, {"value": [{"name": n, "kind": "EntitySet", "url": n} for n in PAGES] + [{"name": "Chart_of_Accounts", "kind": "EntitySet"}]})
     if path == f"{OD}/Customer_Card" and (method == "POST" or "$filter" in query):
         if method == "POST":                 # like Business Central: posting groups needed, the number from the No. series
+            if json.get("State_Code") and json["State_Code"] not in {x.get("State_Code") for x in CUSTOMERS}:
+                return _json(400, {"error": {"message": f"The field State Code of table Customer contains a value ({json['State_Code']}) that cannot be found in the related table (State)."}})
             bad = [k for k in json if k not in {*CUSTOMERS[0], *CUST_TEMPLATE[0]}]
             if bad:
                 return _json(400, {"error": {"message": f"The property '{bad[0]}' does not exist on type 'NAV.Customer_Card'."}})
@@ -906,7 +908,7 @@ def test_new_customer_and_prospect_go_to_business_central(c):
     d = r.json()
     assert d["code"] == "C9001" and d["sync"]["status"] == "synced" and d["kind"] == "prospect"
     sent = BC_NEW_CUST[0]
-    assert sent["Name"] == "Kanpur Kebab House" and sent["GST_Registration_No"] == "09ABCDE1234F1Z5" and sent["State_Code"] == "09"
+    assert sent["Name"] == "Kanpur Kebab House" and sent["GST_Registration_No"] == "09ABCDE1234F1Z5" and sent["State_Code"] == "UP"
     assert sent["Gen_Bus_Posting_Group"] == "DOMESTIC" and sent["Location_Code"] == "LKO" and sent["GST_Customer_Type"] == "Registered"
     assert sent["Customer_Price_Group"] == "SRP" and sent["Phone_No"] == "9839012345" and "Contact" not in sent   # page has no Contact
     assert "Balance_LCY" not in sent and "Last_Date_Modified" not in sent          # only setup fields copied
