@@ -49,6 +49,13 @@ def _customer(db: Session, me: User, cid: int) -> Customer:
     c = get_or_404(db, Customer, cid, "customer")
     if not may_use_customer(db, me, c):
         raise HTTPException(403, "This customer is not assigned to you.")
+    if c.status == "pending":
+        raise HTTPException(422, f"{c.name} is a new customer waiting for a manager's approval.")
+    if c.status == "rejected":
+        raise HTTPException(422, f"{c.name} was not approved: {c.reject_reason}")
+    if c.created_by is not None and c.sync_status != "synced":
+        raise HTTPException(422, f"{c.name} is not in Dynamics yet, so it has no customer number there. "
+                                 + (f"Sending it failed: {c.sync_error}" if c.sync_status == "error" else "It is being sent; try again in a minute."))
     return c
 
 

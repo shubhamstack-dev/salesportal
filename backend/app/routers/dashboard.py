@@ -3,7 +3,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import Attendance, AttendanceCorrection, ExpenseClaim, Payment, SalesDoc, User
+from ..models import Attendance, AttendanceCorrection, Customer, ExpenseClaim, Payment, SalesDoc, User
 from ..security import can_approve_for, current_user, visible_user_ids
 from ..services.calc import day_points
 from ..services.common import f, local_today, pending_signups, to_local
@@ -54,7 +54,8 @@ def counts(db: Session = Depends(get_db), me: User = Depends(current_user)):
     ids = visible_user_ids(db, me)
     out = {"orders": len([o for o in db.scalars(select(SalesDoc).where(SalesDoc.kind == "order", SalesDoc.status == "submitted")) if o.rep_id in ids]),
            "expenses": len([x for x in db.scalars(select(ExpenseClaim).where(ExpenseClaim.status == "submitted")) if can_approve_for(db, me, x.user_id)]),
-           "attendance": len([c for c in db.scalars(select(AttendanceCorrection).where(AttendanceCorrection.status == "pending")) if can_approve_for(db, me, c.user_id)])}
+           "attendance": len([c for c in db.scalars(select(AttendanceCorrection).where(AttendanceCorrection.status == "pending")) if can_approve_for(db, me, c.user_id)]),
+           "customers": len([c for c in db.scalars(select(Customer).where(Customer.status == "pending")) if can_approve_for(db, me, c.created_by or me.id)])}
     if me.role == "admin":
         out["integration"] = sum(len(v) for v in out_queues(db).values())
         out["employees"] = len(pending_signups(db))

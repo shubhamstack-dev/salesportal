@@ -206,7 +206,8 @@ def summary(db: Session = Depends(get_db), _=Depends(admin)):
               "stock": db.query(StockEntry).count()}
     return {"masters": [{"entity": k, "label": v["label"], "count": counts[k], "last": s.get("sync_info", {}).get(k),
                          "api": bool(s["dynamics"]["ep"].get(k))} for k, v in D.ENT.items()],
-            "out": {"quotes": {"count": len(q["quotes"]), "value": sum(float(x.total) for x in q["quotes"])},
+            "out": {"customers": {"count": len(q["customers"]), "value": 0},
+                    "quotes": {"count": len(q["quotes"]), "value": sum(float(x.total) for x in q["quotes"])},
                     "orders": {"count": len(q["orders"]), "value": sum(float(x.total) for x in q["orders"])},
                     "payments": {"count": len(q["payments"]), "value": sum(float(x.amount) for x in q["payments"])},
                     "expenses": {"count": len(q["expenses"]), "value": sum(float(x.total) for x in q["expenses"])}},
@@ -273,6 +274,16 @@ def push(db: Session = Depends(get_db), me: User = Depends(admin)):
     token = D.access_token(s)
     ok = bad = 0
     cache = {}
+    for c in q["customers"]:          # first: quotations and orders need the customer's number in Dynamics
+        if not ep.get("customers"):
+            break
+        try:
+            D.push_customer(db, s, token, c)
+            ok += 1
+        except HTTPException:
+            bad += 1
+    db.commit()
+    q = D.out_queues(db)
     targets = [("quotes", ep.get("quotes")), ("orders", ep.get("orders")), ("payments", ep.get("payments")), ("expenses", ep.get("expenses"))]
     for kind, path in targets:
         if not path:
@@ -297,9 +308,9 @@ def push(db: Session = Depends(get_db), me: User = Depends(admin)):
             except HTTPException as e:
                 x.sync_status, x.sync_error, x.sync_at = "error", str(e.detail)[:500], now_utc()
                 bad += 1
-    skipped = [k for k, path in targets if not path and q[k]]
+    skipped = [k for k, path in [("customers", ep.get("customers")), *targets] if not path and q[k]]
     note = f"; not sent, no endpoint set: {', '.join(skipped)}" if skipped else ""
-    log(db, "out", "Quotations, orders, payments, expenses", ok, "error" if bad or skipped else "ok", f"API: {ok} sent, {bad} failed{note}", me)
+    log(db, "out", "Customers, quotations, orders, payments, expenses", ok, "error" if bad or skipped else "ok", f"API: {ok} sent, {bad} failed{note}", me)
     db.commit()
     return {"sent": ok, "failed": bad, "skipped": skipped}
 

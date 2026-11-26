@@ -78,8 +78,9 @@ def test_masters_are_read_only_and_downloaded(c, admin, masters):
     s = c.get("/api/integration/summary", headers=H(admin)).json()
     counts = {m["entity"]: m["count"] for m in s["masters"]}
     assert counts == {"customers": 5, "materials": 6, "attributes": 16, "prices": 11, "hsn": 4, "charges": 3, "stock": 0}
-    for path in ["/api/customers", "/api/materials", "/api/prices", "/api/hsn", "/api/charges"]:
+    for path in ["/api/materials", "/api/prices", "/api/hsn", "/api/charges"]:
         assert c.post(path, json={"code": "X", "name": "X"}, headers=H(admin)).status_code == 405
+    assert c.post("/api/customers", json={"name": "X"}, headers=H(admin)).status_code == 422     # new customers: checked
     tea = next(m for m in c.get("/api/materials", headers=H(admin)).json() if m["code"] == "SF-TEA-250")
     assert tea["gst"] == 5 and tea["attrs"]["Shelf life"] == "18 months" and tea["base_price"] == 210
 

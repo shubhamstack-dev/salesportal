@@ -39,6 +39,16 @@ CREATE TABLE IF NOT EXISTS `customers` (
   `lng` decimal(9,6) DEFAULT NULL,
   `tagged_by` int DEFAULT NULL,
   `tagged_at` datetime DEFAULT NULL,
+  `kind` varchar(10) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `status` varchar(10) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `contact` varchar(80) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `created_by` int DEFAULT NULL,
+  `created_at` datetime DEFAULT NULL,
+  `decided_by` int DEFAULT NULL,
+  `reject_reason` varchar(200) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `sync_status` varchar(10) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `sync_error` varchar(500) COLLATE utf8mb4_unicode_ci DEFAULT NULL,
+  `sync_at` datetime DEFAULT NULL,
   PRIMARY KEY (`id`),
   UNIQUE KEY `ix_customers_code` (`code`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci

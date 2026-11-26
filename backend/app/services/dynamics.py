@@ -567,6 +567,7 @@ def out_queues(db: Session) -> dict:
     return {
         "quotes": list(db.scalars(select(SalesDoc).where(SalesDoc.kind == "quote", SalesDoc.status.in_(["open", "converted"]), SalesDoc.sync_status.in_(waiting)))),
         "orders": list(db.scalars(select(SalesDoc).where(SalesDoc.kind == "order", SalesDoc.status == "approved", SalesDoc.sync_status.in_(waiting)))),
+        "customers": list(db.scalars(select(Customer).where(Customer.status == "active", Customer.sync_status.in_(waiting)))),
         "payments": list(db.scalars(select(Payment).where(Payment.cancelled.is_(False), Payment.sync_status.in_(waiting)))),
         "expenses": list(db.scalars(select(ExpenseClaim).where(ExpenseClaim.status == "approved", ExpenseClaim.sync_status.in_(waiting)))),
     }
@@ -741,6 +742,113 @@ def auto_send(doc_id: int) -> None:
             d.sync_status, d.sync_error, d.sync_at = "error", f"Automatic send failed: {e}"[:500], now_utc()
         db.commit()
 
+
+
+# ------------------------------------------------------------------ new customers: created in Business Central
+CARD_FIELDS = {"code": "No", "name": "Name", "contact": "Contact", "address": "Address", "address2": "Address_2", "city": "City",
+               "pin": "Post_Code", "state": "State_Code", "gstin": "GST_Registration_No", "phone": "Phone_No", "email": "E_Mail",
+               "price_group": "Customer_Price_Group", "terms": "Payment_Terms_Code"}
+# copied from the template customer (like a customer template in Business Central), when not given here
+COPY_FIELDS = {"genbuspostinggroup", "customerpostinggroup", "vatbuspostinggroup", "countryregioncode", "paymenttermscode",
+               "paymentmethodcode", "locationcode", "customerpricegroup", "customerdiscgroup", "remindertermscode", "currencycode",
+               "taxliable", "taxareacode", "salespersoncode", "applicationmethod", "printstatements", "gstcustomertype",
+               "finchargetermscode", "shipmentmethodcode", "languagecode", "allowlinedisc", "prepayment"}
+
+
+def _odata_eq(field: str, v: str) -> str:
+    return f"$filter={field} eq '{_q(v)}'"
+
+
+def customer_card_body(s: dict, c: Customer, fields: dict, template: dict | None) -> dict:
+    """The new customer as Customer Card fields: the template customer's posting setup first, then this customer."""
+    body = {}
+    for k, v in (template or {}).items():
+        if _norm(k) in COPY_FIELDS and v not in (None, "", "0001-01-01") and not k.startswith("@"):
+            body[k] = v
+    addr = (c.address or "").replace("\n", ", ")
+    vals = {"name": c.name[:100], "contact": (c.contact or "")[:100], "address": addr[:100], "address2": addr[100:150], "city": (c.city or "")[:30],
+            "pin": (c.pin or "")[:20], "state": c.state or "", "gstin": c.gstin or "", "phone": (c.phone or "")[:30], "email": (c.email or "")[:80],
+            "price_group": c.price_group or "", "terms": c.terms or ""}
+    for k, v in vals.items():
+        if v and fields.get(k):
+            body[fields[k]] = v
+    gst_type = next((k for k in (template or {}) if _norm(k) == "gstcustomertype"), None)
+    if gst_type:
+        body[gst_type] = "Registered" if c.gstin else "Unregistered"
+    return body
+
+
+def send_customer(db: Session, s: dict, token: str, c: Customer) -> str:
+    """Creates the customer in Business Central (or links one there with the same GSTIN) and takes its number."""
+    ep = (s["dynamics"]["ep"].get("customers") or "").split("?")[0].strip()
+    if not ep:
+        raise HTTPException(422, "No Customers endpoint is set under Dynamics connection.")
+    url = endpoint_url(s, token, ep)
+    if ep.lower().startswith("odata:"):
+        saved = (s["dynamics"].get("api_map") or {}).get("customers") or {}
+        fields = {k: (saved.get(k) or v) for k, v in CARD_FIELDS.items()}
+        key = fields["code"]
+        if c.gstin and fields.get("gstin"):
+            same = api_call(s, token, f"{url}?{_odata_eq(fields['gstin'], c.gstin)}").get("value") or []
+            if same:
+                return _s(same[0].get(key))
+        template = None
+        t = (s["dynamics"].get("new_customer_template") or "").strip()
+        if t:
+            rows = api_call(s, token, f"{url}?{_odata_eq(key, t)}").get("value") or []
+            if not rows:
+                raise HTTPException(422, f"Template customer {t} (Dynamics connection, New customers) was not found in Business Central.")
+            template = rows[0]
+        r = api_call(s, token, url, "POST", customer_card_body(s, c, fields, template))
+        no = _s(r.get(key) or r.get("No") or r.get("number"))
+    else:                                    # standard API v2.0 customers: no GST or posting groups there
+        if c.gstin:
+            same = api_call(s, token, f"{url}?$filter=taxRegistrationNumber eq '{_q(c.gstin)}'").get("value") or []
+            if same:
+                return _s(same[0].get("number"))
+        r = api_call(s, token, url, "POST", {k: v for k, v in {
+            "displayName": c.name[:100], "addressLine1": (c.address or "")[:100], "city": (c.city or "")[:30], "postalCode": (c.pin or "")[:20],
+            "phoneNumber": (c.phone or "")[:30], "email": (c.email or "")[:80], "taxRegistrationNumber": c.gstin or ""}.items() if v})
+        no = _s(r.get("number"))
+    if not no:
+        raise HTTPException(502, "Business Central created the customer but did not return its number.")
+    return no
+
+
+def push_customer(db: Session, s: dict, token: str, c: Customer) -> str:
+    """send_customer, then the number from Business Central becomes the customer's code here."""
+    try:
+        no = send_customer(db, s, token, c)
+    except HTTPException as e:
+        c.sync_status, c.sync_error, c.sync_at = "error", str(e.detail)[:500], now_utc()
+        raise
+    other = db.scalar(select(Customer).where(Customer.code == no[:40], Customer.id != c.id))
+    if other:
+        c.sync_status, c.sync_error, c.sync_at = "error", f"Business Central already has this customer as {no}, which is {other.name} here. Use that one.", now_utc()
+        raise HTTPException(409, c.sync_error)
+    c.code, c.sync_status, c.sync_error, c.sync_at, c.synced_at = no[:40], "synced", None, now_utc(), now_utc()
+    return no
+
+
+def auto_send_customer(cid: int) -> None:
+    """After a customer is added by a manager or approved. Never raises; a failure stays in the Dynamics sync queue."""
+    from ..db import SessionLocal
+    from ..models import SyncLog
+    with SessionLocal() as db:
+        c = db.get(Customer, cid)
+        if not c or c.status != "active" or c.sync_status not in ("pending", "error"):
+            return
+        s = get_settings(db)
+        if not s["dynamics"].get("auto_customers") or not s["dynamics"]["ep"].get("customers"):
+            return
+        try:
+            no = push_customer(db, s, access_token(s), c)
+            db.add(SyncLog(direction="out", entity="Customer", count=1, status="ok", message=f"{c.name}: created in Dynamics as {no}"))
+        except HTTPException as e:
+            db.add(SyncLog(direction="out", entity="Customer", count=0, status="error", message=f"{c.name}: {e.detail}"[:2000]))
+        except Exception as e:  # noqa: BLE001
+            c.sync_status, c.sync_error, c.sync_at = "error", f"Sending failed: {e}"[:500], now_utc()
+        db.commit()
 
 
 # ------------------------------------------------------------------ company details for printing

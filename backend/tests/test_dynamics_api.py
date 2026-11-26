@@ -59,6 +59,10 @@ ATTRS = [{"Item_No": "SF-001-500", "Attribute": "Pack size", "Value": "500 g"}, 
 CHARGES = [{"Code": "FRT", "Description": "Freight", "Calculation_Type": "Percentage", "Value": 2, "Charge_or_Discount": "Charge", "Applied_On": "Before GST"},
            {"Code": "TCS", "Description": "TCS 0.1%", "Calculation_Type": "Percentage", "Value": 0.1, "Charge_or_Discount": "Charge", "Applied_On": "After GST"}]
 
+BC_NEW_CUST = []              # customers created through the Customer Card page
+CUST_TEMPLATE = [{"No": "C0007", "Name": "Apoorva Enterprises", "Gen_Bus_Posting_Group": "DOMESTIC", "Customer_Posting_Group": "DOMESTIC",
+                  "Country_Region_Code": "IN", "Payment_Terms_Code": "COD", "GST_Customer_Type": "Registered", "Location_Code": "LKO",
+                  "Balance_LCY": 1320, "Blocked": " ", "Customer_Price_Group": "SRP", "Last_Date_Modified": "2026-11-25"}]
 PAGES = {"Customer_Card": CUSTOMERS, "Item_Card": ITEMS, "HSN_SAC": HSN, "PriceListLines": PRICES, "ItemAttributes": ATTRS, "SalesCharges": CHARGES}
 calls = []
 
@@ -245,6 +249,16 @@ def fake_request(method, url, json=None, headers=None, **kw):
         return _json(200, {"value": [{"number": "C0001", "displayName": "Lucknow Frozen Mart"}]})
     if path == f"{ROOT}/ODataV4/":
         return _json(200, {"value": [{"name": n, "kind": "EntitySet", "url": n} for n in PAGES] + [{"name": "Chart_of_Accounts", "kind": "EntitySet"}]})
+    if path == f"{OD}/Customer_Card" and (method == "POST" or "$filter" in query):
+        if method == "POST":                 # like Business Central: posting groups needed, the number from the No. series
+            if not json.get("Gen_Bus_Posting_Group") or not json.get("Customer_Posting_Group"):
+                return _json(400, {"error": {"message": "Gen. Bus. Posting Group must have a value in Customer: No.=C9001."}})
+            rec = {**json, "No": f"C{9001 + len(BC_NEW_CUST)}"}
+            BC_NEW_CUST.append(rec)
+            return _json(201, rec)
+        field, val = unquote(query).split("$filter=")[1].split(" eq ")
+        rows = [x for x in CUSTOMERS + BC_NEW_CUST + CUST_TEMPLATE if str(x.get(field)) == val.strip("'")]
+        return _json(200, {"value": rows})
     if path.startswith(OD + "/"):
         name = path[len(OD) + 1:]
         rows = PAGES.get(name)
@@ -852,3 +866,72 @@ def test_stock_by_location_from_item_ledger(c, monkeypatch):
     monkeypatch.setitem(PAGES, "ItemLedgerEntries", [])
     assert c.post("/api/stock/refresh").status_code == 422
     assert len(c.get("/api/stock").json()["rows"]) == 2
+
+
+def test_new_customer_and_prospect_go_to_business_central(c):
+    connect(c, customers="odata:Customer_Card", quotes="salesQuotes", orders="salesOrders")
+    s = c.get("/api/settings").json()["dynamics"]
+    c.put("/api/settings", json={"dynamics": {**{k: v for k, v in s.items() if k != "client_secret"}, "auto_customers": True, "new_customer_template": ""}})
+    r = c.post("/api/users", json={"name": "Ravi Rep", "username": "ravi", "password": "ravi12345", "role": "rep"})
+    assert r.status_code == 200, r.text
+    rep = {"Authorization": "Bearer " + c.post("/api/auth/login", json={"username": "ravi", "password": "ravi12345"}).json()["token"]}
+    new = {"kind": "prospect", "name": "Kanpur Kebab House", "contact": "Mr. Verma", "address": "Mall Road", "city": "Kanpur", "pin": "208001",
+           "gstin": "09ABCDE1234F1Z5", "phone": "98390 12345", "email": "kkh@example.in", "price_group": "SRP", "terms": ""}
+    assert c.post("/api/customers", json={**new, "gstin": "09ABC"}, headers=rep).status_code == 422
+    assert c.post("/api/customers", json={**new, "gstin": "09AAACL1234F1Z5"}, headers=rep).status_code == 409   # C0001 has it
+    x = c.post("/api/customers", json=new, headers=rep).json()
+    assert x["status"] == "pending" and x["code"].startswith("NEW-") and x["state"] == "09" and x["kind"] == "prospect"
+    # waiting: in the rep's list, not usable for orders, nothing sent
+    assert x["id"] in [y["id"] for y in c.get("/api/customers?view=all", headers=rep).json()]
+    assert x["id"] not in [y["id"] for y in c.get("/api/customers", headers=rep).json()]
+    q = c.post("/api/docs", json={"kind": "quote", "customer_id": x["id"], "date": "2026-11-26", "lines": [{"material": "SF-001-500", "qty": 1}]}, headers=rep)
+    assert q.status_code == 422 and "approval" in q.json()["detail"]
+    assert c.post(f"/api/customers/{x['id']}/approve", headers=rep).status_code == 403
+    assert c.get("/api/counts").json()["customers"] == 1
+    assert [y["id"] for y in c.get("/api/customers?view=pending").json()] == [x["id"]]
+    # approved without posting setup: Business Central refuses, the error is kept, it waits in the queue
+    BC_NEW_CUST.clear()
+    a = c.post(f"/api/customers/{x['id']}/approve")
+    assert a.status_code == 200
+    d = c.get(f"/api/customers/{x['id']}").json()
+    assert d["sync"]["status"] == "error" and "Gen. Bus. Posting Group" in d["sync"]["error"] and d["can_send"]
+    assert c.get("/api/integration/summary").json()["out"]["customers"]["count"] == 1
+    # with a template customer, the posting setup is copied and it goes through
+    c.put("/api/settings", json={"dynamics": {"new_customer_template": "C0007"}})
+    r = c.post(f"/api/customers/{x['id']}/send")
+    assert r.status_code == 200, r.text
+    d = r.json()
+    assert d["code"] == "C9001" and d["sync"]["status"] == "synced" and d["kind"] == "prospect"
+    sent = BC_NEW_CUST[0]
+    assert sent["Name"] == "Kanpur Kebab House" and sent["GST_Registration_No"] == "09ABCDE1234F1Z5" and sent["State_Code"] == "09"
+    assert sent["Gen_Bus_Posting_Group"] == "DOMESTIC" and sent["Location_Code"] == "LKO" and sent["GST_Customer_Type"] == "Registered"
+    assert sent["Customer_Price_Group"] == "SRP" and sent["Phone_No"] == "9839012345" and sent["Contact"] == "Mr. Verma"
+    assert "Balance_LCY" not in sent and "Last_Date_Modified" not in sent          # only setup fields copied
+    # now usable: a quotation goes to Business Central with the new number
+    assert x["id"] in [y["id"] for y in c.get("/api/customers", headers=rep).json()]
+    q = c.post("/api/docs", json={"kind": "quote", "customer_id": x["id"], "date": "2026-11-26", "lines": [{"material": "SF-001-500", "qty": 1}]}, headers=rep)
+    assert q.status_code == 200, q.text
+    assert c.post(f"/api/customers/{x['id']}/convert", headers=rep).json()["kind"] == "customer"
+    assert c.put(f"/api/customers/{x['id']}", json=new, headers=rep).status_code == 422       # in Dynamics now: change it there
+    # a manager's own new customer goes at once; without GSTIN it is Unregistered; one with the same GSTIN in BC is linked
+    y = c.post("/api/customers", json={**new, "kind": "customer", "name": "Cash Party", "gstin": "", "state": "09", "phone": "9000000001"}).json()
+    y = c.get(f"/api/customers/{y['id']}").json()
+    assert y["status"] == "active" and y["code"] == "C9002" and BC_NEW_CUST[1]["GST_Customer_Type"] == "Unregistered"
+    BC_NEW_CUST.append({"No": "C7777", "Name": "Old Party", "GST_Registration_No": "09AAAAA0000A1Z5"})
+    z = c.post("/api/customers", json={**new, "name": "Old Party Pvt", "gstin": "09AAAAA0000A1Z5", "phone": "9000000002"}).json()
+    assert c.get(f"/api/customers/{z['id']}").json()["code"] == "C7777" and len(BC_NEW_CUST) == 3
+    # rejected: the rep sees why, changes it, and it asks again
+    w = c.post("/api/customers", json={**new, "name": "Some Shop", "gstin": "", "state": "09", "phone": "9000000003"}, headers=rep).json()
+    assert c.post(f"/api/customers/{w['id']}/reject", json={"reason": ""}).status_code == 422
+    assert c.post(f"/api/customers/{w['id']}/reject", json={"reason": "Duplicate of Kanpur Kebab House"}).json()["status"] == "rejected"
+    assert c.get(f"/api/customers/{w['id']}", headers=rep).json()["reject_reason"] == "Duplicate of Kanpur Kebab House"
+    assert c.put(f"/api/customers/{w['id']}", json={**new, "name": "Some Shop 2", "gstin": "", "state": "09", "phone": "9000000003"}, headers=rep).json()["status"] == "pending"
+    # downloading customers again keeps it as it is (matched by its number from Business Central)
+    monkeypatch_rows = CUSTOMERS + [{"No": "C9001", "Name": "Kanpur Kebab House", "City": "Kanpur", "State_Code": "09", "GST_Registration_No": "09ABCDE1234F1Z5", "Blocked": " "}]
+    PAGES["Customer_Card"] = monkeypatch_rows
+    try:
+        c.post("/api/integration/pull-all")
+    finally:
+        PAGES["Customer_Card"] = CUSTOMERS
+    same = [y for y in c.get("/api/customers?view=all").json() if y["code"] == "C9001"]
+    assert len(same) == 1 and same[0]["id"] == x["id"] and same[0]["kind"] == "customer"

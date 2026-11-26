@@ -112,6 +112,18 @@ class Customer(Base):
     lng: Mapped[float | None] = mapped_column(Numeric(9, 6), nullable=True)
     tagged_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
     tagged_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Added here (not downloaded): a customer or a prospect; a sales rep's waits for approval, then it is created in
+    # Business Central and takes the number given there. NULL = downloaded from Dynamics.
+    kind: Mapped[str | None] = mapped_column(String(10), nullable=True)               # customer | prospect
+    status: Mapped[str | None] = mapped_column(String(10), nullable=True)             # pending | active | rejected
+    contact: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    created_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    decided_by: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    reject_reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    sync_status: Mapped[str | None] = mapped_column(String(10), nullable=True)        # pending | error | synced
+    sync_error: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    sync_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class Material(Base):

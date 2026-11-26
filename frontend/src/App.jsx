@@ -26,7 +26,7 @@ const NAV = [
   { id: 'orders', label: 'Sales orders', roles: ALL, badge: 'orders' },
   { id: 'invoices', label: 'Sales invoices', roles: ALL },
   { id: 'payments', label: 'Payments', roles: ALL },
-  { id: 'customers', label: 'Customers', roles: ALL },
+  { id: 'customers', label: 'Customers', roles: ALL, badge: 'customers' },
   { grp: 'Expenses' },
   { id: 'expenses', label: 'Expense claims', roles: ALL, badge: 'expenses' },
   { id: 'grades', label: 'Expense policy', roles: ['admin'] },
