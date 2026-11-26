@@ -20,7 +20,7 @@ from datetime import date, datetime
 import httpx
 from fastapi import HTTPException
 from openpyxl import load_workbook
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..models import (Charge, Customer, ExpenseClaim, HsnCode, Material, MaterialAttribute, Payment, Price, SalesDoc, StockEntry, User)
@@ -252,7 +252,8 @@ def pack_qty(given: float, code: str, uom: str) -> float:
     return 0.0
 
 
-def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_rates: dict | None = None) -> dict:
+def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_rates: dict | None = None, full: bool = False) -> dict:
+    """full: rows are the whole list from the Dynamics API, so customers and items not in it were deleted there."""
     """Upserts the rows (or only counts them when dry). Returns added, updated, skipped and first errors."""
     get = lambda r, k: r.get(m.get(k)) if m.get(k) else None  # noqa: E731
     res = {"added": 0, "updated": 0, "skipped": 0, "errors": []}
@@ -274,6 +275,8 @@ def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_
             if dry:
                 continue
             c = c or Customer(code=code)
+            if c.status == "removed":                    # back in Dynamics
+                c.status = None
             c.name, c.gstin, c.state = name[:160], gstin, _state(get(r, "state"), gstin)
             addr = "\n".join(x for x in (_s(get(r, "name2")), _s(get(r, "address")), _s(get(r, "address2"))) if x)
             c.address, c.city, c.pin = addr[:250], _s(get(r, "city"))[:80], _s(get(r, "pin"))[:10]
@@ -281,6 +284,8 @@ def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_
             c.credit_limit, c.balance, c.balance_at, c.synced_at = _num(get(r, "credit_limit")), _num(get(r, "balance")), now, now
             c.blocked = _yes(get(r, "blocked")) if m.get("blocked") else False
             db.add(c)
+        if full:
+            drop_missing(db, "customers", {_s(get(r, "code")) for r in rows}, res, dry)
     elif ent == "materials":
         for i, r in enumerate(rows):
             code, name = _s(get(r, "code")), _s(get(r, "name"))
@@ -316,6 +321,8 @@ def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_
                     p.price, p.uom, p.incl_gst = price, mat.uom, incl
                 else:
                     db.add(Price(type="all", code="", material_code=code, uom=mat.uom, price=price, min_qty=0, incl_gst=incl))
+        if full:
+            drop_missing(db, "materials", {_s(get(r, "code")) for r in rows}, res, dry)
     elif ent == "attributes":
         mats = {x.code: x for x in db.scalars(select(Material))}
         for i, r in enumerate(rows):
@@ -494,6 +501,42 @@ def odata_services(s: dict) -> list[dict]:
     return sorted(({"name": x.get("name"), "kind": x.get("kind", "")} for x in b.get("value", []) if x.get("name")), key=lambda x: x["name"].lower())
 
 
+def drop_missing(db: Session, ent: str, codes: set, res: dict, dry: bool) -> None:
+    """A customer or item deleted in Dynamics goes here too: deleted when nothing here uses it, else hidden (kept for the
+    documents that name it). Not done when most of them would go, which means a filter or a part list, not deletions."""
+    from ..models import SalesDocLine, UserCustomer
+    codes.discard("")
+    if ent == "customers":
+        have = [c for c in db.scalars(select(Customer).where(or_(Customer.status.is_(None), Customer.status != "removed")))
+                if c.created_by is None or c.sync_status == "synced"]
+    else:
+        have = list(db.scalars(select(Material)))
+    gone = [x for x in have if x.code not in codes]
+    if not gone:
+        return
+    if len(gone) > 5 and len(gone) * 2 > len(have):
+        res["errors"].append(f"{len(gone)} of {len(have)} {ent} here are not in this download; none removed (check the endpoint's filter).")
+        return
+    res["removed"] = len(gone)
+    if dry:
+        return
+    for x in gone:
+        if ent == "customers":
+            used = db.scalar(select(SalesDoc.id).where(SalesDoc.customer_id == x.id).limit(1)) or db.scalar(select(Payment.id).where(Payment.customer_id == x.id).limit(1))
+            if used:
+                x.status, x.blocked = "removed", True
+            else:
+                db.query(UserCustomer).filter(UserCustomer.customer_id == x.id).delete()
+                db.delete(x)
+        else:
+            if db.scalar(select(SalesDocLine.id).where(SalesDocLine.material_code == x.code).limit(1)):
+                x.blocked = True
+            else:
+                db.query(Price).filter(Price.material_code == x.code).delete()
+                db.delete(x)
+    db.flush()
+
+
 def stock_endpoint(ep: str) -> str:
     """Item Ledger Entries hold every movement; only the open ones (Remaining Quantity not zero) are stock, so they are
     asked for that way unless the endpoint already has its own $filter."""
@@ -524,6 +567,8 @@ def api_pull(s: dict, ent: str, token: str | None = None, cache: dict | None = N
         b = api_call(s, token, url)
         rows += [{k: v for k, v in x.items() if not k.startswith("@") and (v is None or not isinstance(v, (dict, list)))} for x in b.get("value", [])]
         url, pages = b.get("@odata.nextLink"), pages + 1
+    if url:
+        raise HTTPException(502, f"Dynamics has more than {pages} pages of {ENT[ent]['label'].lower()}; nothing changed. Add a $filter to the endpoint.")
     return rows
 
 
@@ -1080,13 +1125,18 @@ def post_invoice(doc_id: int) -> None:
         except Exception as e:  # noqa: BLE001
             inv.sync_status, inv.sync_error, inv.sync_at = "error", f"Posting failed: {e}"[:500], now_utc()
         db.commit()
+        posted = inv.sync_status == "synced"
+    if posted:                       # the shipment took stock out in Business Central: read it again now
+        from ..routers.stock import _auto_refresh
+        _auto_refresh()
 
 
 def payment_api_lines(db: Session, p: Payment, negative: bool = True) -> list[dict]:
     """The Business Central customerPayments API writes the amount to the cash receipt journal line exactly as sent
     (checked in AequmTest: +660 sent, +660 on the line, which then fails to post), and a customer payment must be
     negative to post, so the API always gets negative amounts, whatever the export-file setting says.
-Customer payment journal lines for one receipt, applied as in Business Central: one line per invoice that is
+
+    Customer payment journal lines for one receipt, applied as in Business Central: one line per invoice that is
     posted there (Applies-to Doc. No. = its posted invoice number), and one line for the rest (on account / advances)."""
     c = db.get(Customer, p.customer_id)
     sign = -1 if negative else 1

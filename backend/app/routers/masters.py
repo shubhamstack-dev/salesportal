@@ -54,7 +54,7 @@ def customers(q: str = "", view: str = "", db: Session = Depends(get_db), me: Us
     elif view != "all":
         rows = [c for c in rows if (c.status or "active") == "active" and in_dynamics_yet(c)]
     else:
-        rows = [c for c in rows if c.status != "rejected" or c.created_by == me.id or me.role != "rep"]
+        rows = [c for c in rows if c.status != "removed" and (c.status != "rejected" or c.created_by == me.id or me.role != "rep")]
     q = q.lower().strip()
     if q:
         rows = [c for c in rows if q in f"{c.code} {c.name} {c.city} {c.gstin} {c.phone}".lower()]

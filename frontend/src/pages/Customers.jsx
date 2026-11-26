@@ -112,10 +112,10 @@ function CustomerView({ id, onClose, onEdit }) {
     {c.payments.length > 0 && <div className="scroll"><table className="t"><thead><tr><th>Receipt</th><th>Date</th><th>Mode</th><th className="r">Amount</th></tr></thead><tbody>
       {c.payments.map((p) => <tr key={p.id}><td className="mono">{p.no}</td><td>{dmy(p.date)}</td><td>{MODES[p.mode]}</td><td className="r">{inr(p.amount)}</td></tr>)}</tbody></table></div>}
     <p className="fine" style={{ margin: 0 }}>The visit location is kept in the portal only, to check that orders are taken at the customer. It does not change the customer in Dynamics.</p>
-    <div className="btns">{c.can_decide && <><button className="btn" disabled={busy} onClick={reject}>Reject</button><button className="btn pri" disabled={busy} onClick={() => act('approve', {}, (r) => `${r.name} approved`)}>Approve</button></>}
+    {(!c.usable || c.can_decide || c.can_send || c.can_edit || c.kind === 'prospect') && <div className="btns">{!c.usable && <button className="btn" onClick={onClose} style={{ marginRight: 'auto' }}>Cancel</button>}{c.can_decide && <><button className="btn" disabled={busy} onClick={reject}>Reject</button><button className="btn pri" disabled={busy} onClick={() => act('approve', {}, (r) => `${r.name} approved`)}>Approve</button></>}
       {c.can_send && <button className="btn pri" disabled={busy} onClick={() => act('send', {}, (r) => `${r.name} is ${r.code} in Dynamics`)}>Send to Dynamics</button>}
       {c.can_edit && <button className="btn" onClick={() => onEdit(c)}>Change</button>}
-      {c.kind === 'prospect' && c.usable && <button className="btn" disabled={busy} onClick={() => act('convert', {}, (r) => `${r.name} is a customer now`)}>Mark as customer</button>}</div>
-    {c.usable && <div className="btns"><button className="btn" disabled={busy} onClick={tag}>{busy ? 'Getting your location…' : 'Tag visit location here'}</button>
+      {c.kind === 'prospect' && c.usable && <button className="btn" disabled={busy} onClick={() => act('convert', {}, (r) => `${r.name} is a customer now`)}>Mark as customer</button>}</div>}
+    {c.usable && <div className="btns"><button className="btn" onClick={onClose} style={{ marginRight: 'auto' }}>Cancel</button><button className="btn" disabled={busy} onClick={tag}>{busy ? 'Getting your location…' : 'Tag visit location here'}</button>
       <a className="btn" href={`#/payment/new?c=${c.id}`} onClick={onClose}>Receive payment</a><a className="btn" href={`#/quote/new?c=${c.id}`} onClick={onClose}>New quotation</a><a className="btn pri" href={`#/order/new?c=${c.id}`} onClick={onClose}>New order</a></div>}</div>}</Modal>
 }

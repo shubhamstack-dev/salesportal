@@ -57,9 +57,11 @@ def run_once(force: bool = False) -> dict | None:
                 done = [x for x in out if x["status"] in ("ok", "warning")]
                 s = get_settings(db)
                 before = (s.get("auto_pull") or {}).get("errors") or []
+                removed = {x["label"]: x["removed"] for x in done if x.get("removed")}
                 msg = (f"Automatic download: {len(done)} downloaded"
+                       + "".join(f"; {k}: {v} removed (deleted in Dynamics)" for k, v in removed.items())
                        + (f"; failed: " + "; ".join(f"{k}: {v}" for k, v in errors) if errors else ""))
-                if errors != before:                         # a new problem, or fixed
+                if errors != before or removed:              # a new problem, fixed, or something deleted in Dynamics
                     log(db, "in", "Masters (automatic)", sum(x.get("added", 0) + x.get("updated", 0) for x in done),
                         "error" if errors else "ok", msg[:2000], None)
                 summary = {"at": iso_utc(now_utc()), "running": False, "errors": errors, "ok": len(done),

@@ -45,6 +45,8 @@ def _auto_refresh():
     try:
         db = SessionLocal()
         try:
+            if not get_settings(db)["dynamics"]["ep"].get("stock"):
+                return
             refresh(db, None)
         except Exception as e:  # noqa: BLE001
             db.rollback()

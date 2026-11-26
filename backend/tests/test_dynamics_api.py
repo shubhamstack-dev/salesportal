@@ -280,6 +280,8 @@ def fake_request(method, url, json=None, headers=None, **kw):
     if path.startswith(OD + "/"):
         name = path[len(OD) + 1:]
         rows = PAGES.get(name)
+        if name == "Customer_Card" and rows is not None:
+            rows = rows + BC_NEW_CUST                       # customers created through the page are listed there too
         if rows is None:
             return _json(404, {"error": {"message": f"No HTTP resource was found that matches the request URI '{unquote(url)}'."}})
         if "$skiptoken=2" in query:                      # second page
@@ -550,8 +552,8 @@ def test_company_details_from_dynamics(c, monkeypatch):
 
 def test_customer_address_lines_and_item_mrp_pack(c, monkeypatch):
     cust = [{**CUSTOMERS[0], "Name": "Mr.Durgesh K Gupta", "Name_2": "D.S Associates", "Address": "Ward No.-41,", "Address_2": "Rahmatnagar, Mirzapur",
-             "City": "Gorakhpur", "Post_Code": "273005"}]
-    items = [{**ITEMS[0], "No": "SF-001-1000.", "Unit_Price": 660}, {**ITEMS[1], "No": "SF-013-1000", "Unit_Price": 690, "Net_Weight": 0}]
+             "City": "Gorakhpur", "Post_Code": "273005"}] + CUSTOMERS[1:]           # whole lists: missing ones were deleted in BC
+    items = [{**ITEMS[0], "No": "SF-001-1000.", "Unit_Price": 660}, {**ITEMS[1], "No": "SF-013-1000", "Unit_Price": 690, "Net_Weight": 0}] + ITEMS
     monkeypatch.setitem(PAGES, "Customer_Card", cust)
     monkeypatch.setitem(PAGES, "Item_Card", items)
     connect(c)
@@ -574,7 +576,7 @@ def test_mrp_includes_gst_price_groups_do_not(c, monkeypatch):
     """MRP (item Unit Price / all customers) has GST in it; SRP, CRP and HORECA prices get GST added.
     Each customer gets its own price group's price; the MRP only when its group has none for the item.
     The report's example: MRP 900, 20% discount, 2 kg, 5% GST -> 1371.43 + 68.57 = 1440. Pkts from the PACKET unit."""
-    items = [{**ITEMS[0], "Unit_Price": 900}, {**ITEMS[1], "Unit_Price": 640}]
+    items = [{**ITEMS[0], "Unit_Price": 900}, {**ITEMS[1], "Unit_Price": 640}] + ITEMS[2:]
     groups = [("SRP", 700), ("CRP", 650), ("HORECA", 600)]
     prices = [{"Price_Type": "Sale", "Source_Type": "Customer Price Group", "Source_No": g, "Product_No": "SF-001-500", "Unit_of_Measure_Code": "KG",
                "Minimum_Quantity": 0, "Unit_Price": v, "Starting_Date": EMPTY, "Ending_Date": EMPTY, "Status": "Active"} for g, v in groups]
@@ -583,7 +585,7 @@ def test_mrp_includes_gst_price_groups_do_not(c, monkeypatch):
              {**CUSTOMERS[0], "No": "G-horeca2", "Name": "Lower case group", "Customer_Price_Group": " horeca "}]
     monkeypatch.setitem(PAGES, "Item_Card", items)
     monkeypatch.setitem(PAGES, "PriceListLines", prices)
-    monkeypatch.setitem(PAGES, "Customer_Card", custs)
+    monkeypatch.setitem(PAGES, "Customer_Card", CUSTOMERS + custs)
     monkeypatch.setitem(PAGES, "Item_Units_of_Measure", UNITS)
     monkeypatch.setitem(globals(), "CUSTOMERS", CUSTOMERS + custs)      # Business Central knows them too
     connect(c, units="odata:Item_Units_of_Measure")
@@ -1003,3 +1005,63 @@ def test_masters_download_by_themselves(c, monkeypatch):
         assert "Materials" not in {e[0] for e in scheduler.run_once(force=True)["errors"]} and n() == k + 2
     finally:
         CUSTOMERS.pop()
+
+
+def test_customer_and_item_deleted_in_business_central_go_here_too(c, monkeypatch):
+    connect(c, customers="odata:Customer_Card", materials="odata:Item_Card", stock="")
+    extra = [{**CUSTOMERS[0], "No": "C0800", "Name": "Temp Buyer", "GST_Registration_No": "", "Phone_No": ""},
+             {**CUSTOMERS[0], "No": "C0801", "Name": "Buyer With Order", "GST_Registration_No": "", "Phone_No": ""}]
+    monkeypatch.setitem(PAGES, "Customer_Card", CUSTOMERS + extra)
+    monkeypatch.setitem(PAGES, "Item_Card", ITEMS + [{**ITEMS[0], "No": "SF-777", "Description": "Old item"}])
+    c.post("/api/integration/pull-all")
+    ids = {x["code"]: x["id"] for x in c.get("/api/customers").json()}
+    assert {"C0800", "C0801"} <= set(ids) and "SF-777" in {m["code"] for m in c.get("/api/materials").json()}
+    c.post("/api/payments", json={"customer_id": ids["C0801"], "date": "2026-11-26", "amount": 100, "mode": "cash", "ref": "", "allocations": []})
+    # a file with only some customers removes nothing
+    import io
+    from openpyxl import Workbook
+    wb = Workbook(); ws = wb.active; ws.append(["No.", "Name"]); ws.append(["C0800", "Temp Buyer"]); buf = io.BytesIO(); wb.save(buf)
+    p = c.post("/api/integration/import/customers/file", files={"file": ("c.xlsx", buf.getvalue())}).json()
+    c.post("/api/integration/import/customers/apply", json={"import_id": p["import_id"], "sheet": p["sheet"], "map": p["map"]})
+    assert "C0001" in {x["code"] for x in c.get("/api/customers").json()}
+    # deleted in Business Central
+    monkeypatch.setitem(PAGES, "Customer_Card", list(CUSTOMERS))
+    monkeypatch.setitem(PAGES, "Item_Card", list(ITEMS))
+    res = {x["entity"]: x for x in c.post("/api/integration/pull-all").json()["results"]}
+    assert res["customers"]["removed"] == 2 and res["materials"]["removed"] == 1
+    all_ = {x["code"] for x in c.get("/api/customers?view=all").json()}
+    assert "C0800" not in all_ and "C0801" not in all_ and "C0800" not in {x["code"] for x in c.get("/api/customers").json()}
+    from app.db import SessionLocal
+    with SessionLocal() as db:
+        assert db.query(Customer).filter_by(code="C0800").count() == 0              # unused: deleted
+        kept = db.query(Customer).filter_by(code="C0801").one()                   # has a payment: kept, hidden
+        assert kept.status == "removed" and kept.blocked
+    assert "SF-777" not in {m["code"] for m in c.get("/api/materials").json()}
+    assert any("2 removed (deleted in Dynamics)" in x["message"] for x in c.get("/api/integration/summary").json()["log"])
+    # back in Business Central: shown again
+    monkeypatch.setitem(PAGES, "Customer_Card", CUSTOMERS + extra[1:])
+    c.post("/api/integration/pull-all")
+    assert "C0801" in {x["code"] for x in c.get("/api/customers").json()}
+    # an endpoint that lists only a few (a filter, a short page) removes nothing
+    many = [{**CUSTOMERS[0], "No": f"C1{i:03d}", "Name": f"Shop {i}", "GST_Registration_No": "", "Phone_No": ""} for i in range(12)]
+    monkeypatch.setitem(PAGES, "Customer_Card", CUSTOMERS + extra[1:] + many)
+    c.post("/api/integration/pull-all")
+    monkeypatch.setitem(PAGES, "Customer_Card", CUSTOMERS[:1])
+    res = {x["entity"]: x for x in c.post("/api/integration/pull-all").json()["results"]}
+    assert not res["customers"].get("removed") and "none removed" in " ".join(res["customers"]["errors"])
+    assert "C1005" in {x["code"] for x in c.get("/api/customers").json()}
+
+
+def test_stock_read_again_after_an_invoice_is_posted(c, monkeypatch):
+    import app.routers.stock as st
+    calls_ = []
+    monkeypatch.setattr(st, "_auto_refresh", lambda: calls_.append(1))
+    connect(c, quotes="salesQuotes", orders="salesOrders")
+    c.put("/api/settings", json={"dynamics": {"auto_push": True, "post_invoices": True}})
+    BC_EXT["installed"] = True
+    ids = {x["code"]: x["id"] for x in c.get("/api/customers").json()}
+    from app.services.common import local_today
+    o = c.post("/api/docs", json={"kind": "order", "customer_id": ids["C0001"], "date": local_today().isoformat(), "lines": [{"material": "SF-002-500", "qty": 1}]}).json()
+    r = c.post(f"/api/docs/{o['id']}/invoice", json={})
+    assert r.status_code == 200, r.text
+    assert c.get(f"/api/docs/{r.json()['id']}").json()["sync"]["status"] == "synced" and calls_ == [1]

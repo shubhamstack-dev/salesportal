@@ -27,7 +27,7 @@ def _preview(db: Session, ent: str, key: str, si: int | None, mapping: dict | No
     from_api = data["source"].startswith("Dynamics API")
     m = mapping or (D.api_map(get_settings(db), ent, sh["headers"]) if from_api else D.auto_map(ent, sh["headers"]))
     rates = _rates(db, gst_rates)
-    res = D.apply_rows(db, ent, sh["rows"], m, dry=True, gst_rates=rates)
+    res = D.apply_rows(db, ent, sh["rows"], m, dry=True, gst_rates=rates, full=from_api)
     db.rollback()
     return {"import_id": key, "gst_groups": D.gst_groups(sh["rows"], m, rates) if ent == "hsn" else [], "entity": ent, "label": D.ENT[ent]["label"], "source": data["source"], "sheet": si,
             "sheets": [{"name": s["name"], "rows": len(s["rows"])} for s in sheets], "headers": sh["headers"], "fields": list(D.ENT[ent]["fields"]),
@@ -85,7 +85,7 @@ def apply(ent: str, body: MapIn, db: Session = Depends(get_db), me: User = Depen
     s = get_settings(db)
     m = body.map or (D.api_map(s, ent, sh["headers"]) if from_api else D.auto_map(ent, sh["headers"]))
     rates = _rates(db, body.gst_rates)
-    res = D.apply_rows(db, ent, sh["rows"], m, dry=False, gst_rates=rates)
+    res = D.apply_rows(db, ent, sh["rows"], m, dry=False, gst_rates=rates, full=from_api)
     if ent == "materials" and from_api:
         try:
             db.flush()
@@ -101,7 +101,8 @@ def apply(ent: str, body: MapIn, db: Session = Depends(get_db), me: User = Depen
         del patch["dynamics"]
     put_settings(db, patch)
     log(db, "in", D.ENT[ent]["label"], res["added"] + res["updated"], "warning" if res["skipped"] else "ok",
-        f"{data['source']}: {res['added']} new, {res['updated']} updated, {res['skipped']} skipped", me)
+        f"{data['source']}: {res['added']} new, {res['updated']} updated, {res['skipped']} skipped"
+        + (f", {res['removed']} removed (deleted in Dynamics)" if res.get("removed") else ""), me)
     db.commit()
     return res
 
@@ -141,13 +142,13 @@ def run_pull_all(db: Session, me: User | None, quiet: bool = False) -> list[dict
             out.append({"entity": ent, "label": label, "status": "error", "message": msg})
             continue
         rates = s["dynamics"].get("gst_rates") or {}
-        dry = D.apply_rows(db, ent, rows, m, dry=True, gst_rates=rates)
+        dry = D.apply_rows(db, ent, rows, m, dry=True, gst_rates=rates, full=True)
         db.rollback()
         if ent in ("prices", "charges", "stock") and not dry["added"]:     # these replace everything; never wipe them with nothing
             out.append({"entity": ent, "label": label, "status": "error", "message": f"No usable rows ({dry['skipped']} skipped); nothing replaced",
                         "errors": dry["errors"][:5]})
             continue
-        res = D.apply_rows(db, ent, rows, m, dry=False, gst_rates=rates)
+        res = D.apply_rows(db, ent, rows, m, dry=False, gst_rates=rates, full=True)
         if ent == "materials":
             items = (rows, m)
             try:
@@ -162,11 +163,13 @@ def run_pull_all(db: Session, me: User | None, quiet: bool = False) -> list[dict
         s = get_settings(db)
         put_settings(db, {"sync_info": {**s.get("sync_info", {}), ent: iso_utc(now_utc())}})
         log(db, "in", label, res["added"] + res["updated"], "warning" if res["skipped"] else "ok",
-            f"Dynamics API: {res['added']} new, {res['updated']} updated, {res['skipped']} skipped", me)
+            f"Dynamics API: {res['added']} new, {res['updated']} updated, {res['skipped']} skipped"
+            + (f", {res['removed']} removed (deleted in Dynamics)" if res.get("removed") else ""), me)
         db.commit()
         s = get_settings(db)
         out.append({"entity": ent, "label": label, "status": "warning" if res["skipped"] else "ok", "added": res["added"], "updated": res["updated"],
-                    "skipped": res["skipped"], "errors": res["errors"][:5], "item_prices": res.get("item_prices", 0)})
+                    "skipped": res["skipped"], "errors": res["errors"][:5], "item_prices": res.get("item_prices", 0),
+                    "removed": res.get("removed", 0)})
     return out
 
 
