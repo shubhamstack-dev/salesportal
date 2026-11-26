@@ -60,7 +60,7 @@ CHARGES = [{"Code": "FRT", "Description": "Freight", "Calculation_Type": "Percen
            {"Code": "TCS", "Description": "TCS 0.1%", "Calculation_Type": "Percentage", "Value": 0.1, "Charge_or_Discount": "Charge", "Applied_On": "After GST"}]
 
 BC_NEW_CUST = []              # customers created through the Customer Card page
-CUST_TEMPLATE = [{"No": "C0007", "Name": "Apoorva Enterprises", "Gen_Bus_Posting_Group": "DOMESTIC", "Customer_Posting_Group": "DOMESTIC",
+CUST_TEMPLATE = [{**{k: "" for k in CUSTOMERS[0] if k != "@odata.etag"}, "No": "C0007", "Name": "Apoorva Enterprises", "Gen_Bus_Posting_Group": "DOMESTIC", "Customer_Posting_Group": "DOMESTIC",
                   "Country_Region_Code": "IN", "Payment_Terms_Code": "COD", "GST_Customer_Type": "Registered", "Location_Code": "LKO",
                   "Balance_LCY": 1320, "Blocked": " ", "Customer_Price_Group": "SRP", "Last_Date_Modified": "2026-11-25"}]
 PAGES = {"Customer_Card": CUSTOMERS, "Item_Card": ITEMS, "HSN_SAC": HSN, "PriceListLines": PRICES, "ItemAttributes": ATTRS, "SalesCharges": CHARGES}
@@ -251,6 +251,9 @@ def fake_request(method, url, json=None, headers=None, **kw):
         return _json(200, {"value": [{"name": n, "kind": "EntitySet", "url": n} for n in PAGES] + [{"name": "Chart_of_Accounts", "kind": "EntitySet"}]})
     if path == f"{OD}/Customer_Card" and (method == "POST" or "$filter" in query):
         if method == "POST":                 # like Business Central: posting groups needed, the number from the No. series
+            bad = [k for k in json if k not in {*CUSTOMERS[0], *CUST_TEMPLATE[0]}]
+            if bad:
+                return _json(400, {"error": {"message": f"The property '{bad[0]}' does not exist on type 'NAV.Customer_Card'."}})
             if not json.get("Gen_Bus_Posting_Group") or not json.get("Customer_Posting_Group"):
                 return _json(400, {"error": {"message": "Gen. Bus. Posting Group must have a value in Customer: No.=C9001."}})
             rec = {**json, "No": f"C{9001 + len(BC_NEW_CUST)}"}
@@ -905,7 +908,7 @@ def test_new_customer_and_prospect_go_to_business_central(c):
     sent = BC_NEW_CUST[0]
     assert sent["Name"] == "Kanpur Kebab House" and sent["GST_Registration_No"] == "09ABCDE1234F1Z5" and sent["State_Code"] == "09"
     assert sent["Gen_Bus_Posting_Group"] == "DOMESTIC" and sent["Location_Code"] == "LKO" and sent["GST_Customer_Type"] == "Registered"
-    assert sent["Customer_Price_Group"] == "SRP" and sent["Phone_No"] == "9839012345" and sent["Contact"] == "Mr. Verma"
+    assert sent["Customer_Price_Group"] == "SRP" and sent["Phone_No"] == "9839012345" and "Contact" not in sent   # page has no Contact
     assert "Balance_LCY" not in sent and "Last_Date_Modified" not in sent          # only setup fields copied
     # now usable: a quotation goes to Business Central with the new number
     assert x["id"] in [y["id"] for y in c.get("/api/customers", headers=rep).json()]

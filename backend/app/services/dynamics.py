@@ -745,6 +745,10 @@ def auto_send(doc_id: int) -> None:
 
 
 # ------------------------------------------------------------------ new customers: created in Business Central
+CARD_ALT = {"contact": ["Contact", "ContactName", "Contact_Name", "Primary_Contact_Name"], "address2": ["Address_2", "Address2"],
+            "email": ["E_Mail", "EMail", "Email"], "phone": ["Phone_No", "PhoneNo", "Mobile_Phone_No"], "pin": ["Post_Code", "PostCode"],
+            "gstin": ["GST_Registration_No", "GSTRegistrationNo"], "state": ["State_Code", "State"], "terms": ["Payment_Terms_Code"],
+            "price_group": ["Customer_Price_Group"]}
 CARD_FIELDS = {"code": "No", "name": "Name", "contact": "Contact", "address": "Address", "address2": "Address_2", "city": "City",
                "pin": "Post_Code", "state": "State_Code", "gstin": "GST_Registration_No", "phone": "Phone_No", "email": "E_Mail",
                "price_group": "Customer_Price_Group", "terms": "Payment_Terms_Code"}
@@ -799,7 +803,16 @@ def send_customer(db: Session, s: dict, token: str, c: Customer) -> str:
             if not rows:
                 raise HTTPException(422, f"Template customer {t} (Dynamics connection, New customers) was not found in Business Central.")
             template = rows[0]
-        r = api_call(s, token, url, "POST", customer_card_body(s, c, fields, template))
+        # only fields the published page has (pages differ by version and localisation): its own row shows them
+        known = set(template or {}) or set((api_call(s, token, f"{url}?$top=1").get("value") or [{}])[0])
+        if known:
+            for k in list(fields):
+                if fields[k] not in known:
+                    fields[k] = next((a for a in CARD_ALT.get(k, []) if a in known), None)
+        body = customer_card_body(s, c, fields, template)
+        if known:
+            body = {k: v for k, v in body.items() if k in known}
+        r = api_call(s, token, url, "POST", body)
         no = _s(r.get(key) or r.get("No") or r.get("number"))
     else:                                    # standard API v2.0 customers: no GST or posting groups there
         if c.gstin:
