@@ -23,7 +23,7 @@ EMPTY = "0001-01-01"
 
 CUSTOMERS = [
     {"@odata.etag": "W/1", "No": "C0001", "Name": "Lucknow Frozen Mart", "Address": "Hazratganj", "City": "Lucknow", "Post_Code": "226001",
-     "State_Code": "UP", "GST_Registration_No": "09AAACL1234F1Z5", "Phone_No": "9800000001", "E_Mail": "lfm@example.in",
+     "State_Code": "UP", "GST_Registration_No": "09AAACL1234F1Z5", "P_A_N_No": "AAACL1234F", "Phone_No": "9800000001", "E_Mail": "lfm@example.in",
      "Customer_Price_Group": "RETAIL", "Payment_Terms_Code": "30D", "Credit_Limit_LCY": 500000, "Balance_LCY": 125000.5, "Blocked": " "},
     {"No": "C0002", "Name": "Delhi Foods", "City": "New Delhi", "State_Code": "DL", "GST_Registration_No": "07AAACD9999K1Z1",
      "Customer_Price_Group": "", "Credit_Limit_LCY": 0, "Balance_LCY": 0, "Blocked": " "},
@@ -60,6 +60,7 @@ CHARGES = [{"Code": "FRT", "Description": "Freight", "Calculation_Type": "Percen
            {"Code": "TCS", "Description": "TCS 0.1%", "Calculation_Type": "Percentage", "Value": 0.1, "Charge_or_Discount": "Charge", "Applied_On": "After GST"}]
 
 BC_NEW_CUST = []              # customers created through the Customer Card page
+BC_FAIL_PATCH = []            # put something in to make the next customer PATCH fail
 CUST_TEMPLATE = [{**{k: "" for k in CUSTOMERS[0] if k != "@odata.etag"}, "No": "C0007", "Name": "Apoorva Enterprises", "Gen_Bus_Posting_Group": "DOMESTIC", "Customer_Posting_Group": "DOMESTIC",
                   "Country_Region_Code": "IN", "Payment_Terms_Code": "COD", "GST_Customer_Type": "Registered", "Location_Code": "LKO",
                   "Balance_LCY": 1320, "Blocked": " ", "Customer_Price_Group": "SRP", "Last_Date_Modified": "2026-11-25"}]
@@ -231,8 +232,6 @@ def fake_request(method, url, json=None, headers=None, **kw):
                                      {"id": "j-bank-2", "code": "BANK", "displayName": "Bank receipts"}]})
     if method == "POST" and path.endswith("/customerPayments"):
         BC_PAYMENTS.append(json)
-        # like the real customerPayments API: a positive amount is a payment received; the journal line gets it negated,
-        # and posting a cash receipt line for a customer needs it negative
         # like the real customerPayments API (seen in AequmTest): the journal line keeps the amount as sent,
         # and Business Central posts a customer cash receipt only when it is negative
         BC_PAYMENTS[-1] = {**json, "journalAmount": json.get("amount", 0)}
@@ -249,10 +248,24 @@ def fake_request(method, url, json=None, headers=None, **kw):
         return _json(200, {"value": [{"number": "C0001", "displayName": "Lucknow Frozen Mart"}]})
     if path == f"{ROOT}/ODataV4/":
         return _json(200, {"value": [{"name": n, "kind": "EntitySet", "url": n} for n in PAGES] + [{"name": "Chart_of_Accounts", "kind": "EntitySet"}]})
+    if path.startswith(f"{OD}/Customer_Card(") and method == "PATCH":
+        no = unquote(path[len(OD):]).split("'")[1]
+        rec = next((x for x in BC_NEW_CUST if x["No"] == no), None)
+        if rec is None:
+            return _json(404, {"error": {"message": "not found"}})
+        if BC_FAIL_PATCH:
+            BC_FAIL_PATCH.pop()
+            return _json(400, {"error": {"message": "GST Registration No. is not valid for State Code UP."}})
+        if "GST_Registration_No" in json and not rec.get("P_A_N_No"):
+            return _json(400, {"error": {"message": "PAN No. must be entered."}})
+        rec.update(json)
+        return _json(200, rec)
     if path == f"{OD}/Customer_Card" and (method == "POST" or "$filter" in query):
         if method == "POST":                 # like Business Central: posting groups needed, the number from the No. series
             if json.get("State_Code") and json["State_Code"] not in {x.get("State_Code") for x in CUSTOMERS}:
                 return _json(400, {"error": {"message": f"The field State Code of table Customer contains a value ({json['State_Code']}) that cannot be found in the related table (State)."}})
+            if json.get("GST_Registration_No"):     # India: checked in page order, before the PAN is in
+                return _json(400, {"error": {"message": "PAN No. must be entered."}})
             bad = [k for k in json if k not in {*CUSTOMERS[0], *CUST_TEMPLATE[0]}]
             if bad:
                 return _json(400, {"error": {"message": f"The property '{bad[0]}' does not exist on type 'NAV.Customer_Card'."}})
@@ -912,6 +925,7 @@ def test_new_customer_and_prospect_go_to_business_central(c):
     assert sent["Gen_Bus_Posting_Group"] == "DOMESTIC" and sent["Location_Code"] == "LKO" and sent["GST_Customer_Type"] == "Registered"
     assert sent["Customer_Price_Group"] == "SRP" and sent["Phone_No"] == "9839012345" and "Contact" not in sent   # page has no Contact
     assert "Balance_LCY" not in sent and "Last_Date_Modified" not in sent          # only setup fields copied
+    assert sent["P_A_N_No"] == "ABCDE1234F"                                          # from the GSTIN, set before it
     # now usable: a quotation goes to Business Central with the new number
     assert x["id"] in [y["id"] for y in c.get("/api/customers", headers=rep).json()]
     q = c.post("/api/docs", json={"kind": "quote", "customer_id": x["id"], "date": "2026-11-26", "lines": [{"material": "SF-001-500", "qty": 1}]}, headers=rep)
@@ -940,3 +954,19 @@ def test_new_customer_and_prospect_go_to_business_central(c):
         PAGES["Customer_Card"] = CUSTOMERS
     same = [y for y in c.get("/api/customers?view=all").json() if y["code"] == "C9001"]
     assert len(same) == 1 and same[0]["id"] == x["id"] and same[0]["kind"] == "customer"
+
+
+def test_new_customer_gst_step_fails_then_finishes_without_a_second_customer(c):
+    connect(c, customers="odata:Customer_Card")
+    c.put("/api/settings", json={"dynamics": {"new_customer_template": "C0007", "auto_customers": True}})
+    n = len(BC_NEW_CUST)
+    BC_FAIL_PATCH.append(1)
+    x = c.post("/api/customers", json={"kind": "customer", "name": "Prayag Traders", "gstin": "09AFUFS4116C1ZT", "phone": "7888367442", "price_group": "", "terms": ""}).json()
+    d = c.get(f"/api/customers/{x['id']}").json()
+    no = BC_NEW_CUST[n]["No"]
+    assert d["code"] == no and d["sync"]["status"] == "error" and "could not be set" in d["sync"]["error"] and d["can_send"]
+    assert d["id"] not in [y["id"] for y in c.get("/api/customers").json()]          # not usable yet
+    r = c.post(f"/api/customers/{x['id']}/send")
+    assert r.status_code == 200, r.text
+    assert len(BC_NEW_CUST) == n + 1 and BC_NEW_CUST[n]["GST_Registration_No"] == "09AFUFS4116C1ZT" and BC_NEW_CUST[n]["GST_Customer_Type"] == "Registered"
+    assert r.json()["code"] == no and r.json()["sync"]["status"] == "synced"

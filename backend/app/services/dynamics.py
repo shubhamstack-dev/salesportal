@@ -812,7 +812,8 @@ def send_customer(db: Session, s: dict, token: str, c: Customer) -> str:
         saved = (s["dynamics"].get("api_map") or {}).get("customers") or {}
         fields = {k: (saved.get(k) or v) for k, v in CARD_FIELDS.items()}
         key = fields["code"]
-        if c.gstin and fields.get("gstin"):
+        started = not (c.code or "").startswith("NEW-")     # made in an earlier try; only its GST details are left
+        if c.gstin and fields.get("gstin") and not started:
             same = api_call(s, token, f"{url}?{_odata_eq(fields['gstin'], c.gstin)}").get("value") or []
             if same:
                 return _s(same[0].get(key))
@@ -832,8 +833,32 @@ def send_customer(db: Session, s: dict, token: str, c: Customer) -> str:
         body = customer_card_body(s, c, fields, template, bc_state(s, token, url, fields, c.state or ""))
         if known:
             body = {k: v for k, v in body.items() if k in known}
-        r = api_call(s, token, url, "POST", body)
-        no = _s(r.get(key) or r.get("No") or r.get("number"))
+        # India: GST Registration No. needs the P.A.N. No. (characters 3-12 of the GSTIN) first, and Business Central
+        # checks it as the page orders its fields, so the customer is made with the PAN, then given its GST details
+        gst_type = next((k for k in body if _norm(k) == "gstcustomertype"), None)
+        gst = {k: body.pop(k) for k in [gst_type, fields.get("gstin")] if k and k in body}
+        pan = next((k for k in known if _norm(k) in ("pano", "panno")), None)
+        if pan and c.gstin:
+            body[pan] = c.gstin[2:12]
+        if started:
+            no = c.code
+        else:
+            r = api_call(s, token, url, "POST", body)
+            no = _s(r.get(key) or r.get("No") or r.get("number"))
+            if not no:
+                raise HTTPException(502, "Business Central created the customer but did not return its number.")
+            if gst:
+                other = db.scalar(select(Customer).where(Customer.code == no[:40], Customer.id != c.id))
+                if not other:
+                    c.code = no[:40]                    # so a retry finishes this one instead of making another
+                    db.flush()
+        rec = f"{url}('{_q(no)}')"
+        for k, v in gst.items():                      # customer type first, then the GSTIN
+            try:
+                api_call(s, token, rec, "PATCH", {k: v}, headers={"If-Match": "*"})
+            except HTTPException as e:
+                raise HTTPException(e.status_code, f"Created in Business Central as {no}, but its {k.replace('_', ' ')} could not be set: {e.detail} "
+                                                   "Fix it there, or here and press Send to Dynamics again.")
     else:                                    # standard API v2.0 customers: no GST or posting groups there
         if c.gstin:
             same = api_call(s, token, f"{url}?$filter=taxRegistrationNumber eq '{_q(c.gstin)}'").get("value") or []
