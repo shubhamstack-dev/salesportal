@@ -4,7 +4,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import (Charge, Customer, ExpenseClaim, HsnCode, Material, MaterialAttribute, Payment, Price, SalesDoc, SyncLog, User)
+from ..models import (Charge, Customer, ExpenseClaim, HsnCode, Material, MaterialAttribute, Payment, Price, SalesDoc, StockEntry, SyncLog, User)
 from ..security import require
 from ..services import dynamics as D
 from ..services.common import get_settings, iso_utc, log, now_utc, put_settings
@@ -134,7 +134,7 @@ def pull_all(db: Session = Depends(get_db), me: User = Depends(admin)):
         rates = s["dynamics"].get("gst_rates") or {}
         dry = D.apply_rows(db, ent, rows, m, dry=True, gst_rates=rates)
         db.rollback()
-        if ent in ("prices", "charges") and not dry["added"]:     # these replace everything; never wipe them with nothing
+        if ent in ("prices", "charges", "stock") and not dry["added"]:     # these replace everything; never wipe them with nothing
             out.append({"entity": ent, "label": label, "status": "error", "message": f"No usable rows ({dry['skipped']} skipped); nothing replaced",
                         "errors": dry["errors"][:5]})
             continue
@@ -145,6 +145,8 @@ def pull_all(db: Session = Depends(get_db), me: User = Depends(admin)):
                 res["packs"] = D.apply_packs(db, s, token, cache)["items"]
             except HTTPException as e:
                 res["errors"] = [*res["errors"], f"Packets (Item Units of Measure): {e.detail}"]
+        if ent == "stock":
+            put_settings(db, {"stock_locations": D.location_names(s, token)})
         if ent == "prices" and items:
             db.flush()
             res["item_prices"] = D.item_price_fallback(db, *items)
@@ -200,7 +202,8 @@ def summary(db: Session = Depends(get_db), _=Depends(admin)):
     waiting_file = sum(db.query(M).filter(M.sync_status == "exported").count() for M in (SalesDoc, Payment, ExpenseClaim))
     errors = sum(db.query(M).filter(M.sync_status == "error").count() for M in (SalesDoc, Payment, ExpenseClaim))
     counts = {"customers": db.query(Customer).count(), "materials": db.query(Material).count(), "attributes": db.query(MaterialAttribute).count(),
-              "prices": db.query(Price).count(), "hsn": db.query(HsnCode).count(), "charges": db.query(Charge).count()}
+              "prices": db.query(Price).count(), "hsn": db.query(HsnCode).count(), "charges": db.query(Charge).count(),
+              "stock": db.query(StockEntry).count()}
     return {"masters": [{"entity": k, "label": v["label"], "count": counts[k], "last": s.get("sync_info", {}).get(k),
                          "api": bool(s["dynamics"]["ep"].get(k))} for k, v in D.ENT.items()],
             "out": {"quotes": {"count": len(q["quotes"]), "value": sum(float(x.total) for x in q["quotes"])},

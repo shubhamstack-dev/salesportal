@@ -129,6 +129,18 @@ class Material(Base):
                                                                  order_by="MaterialAttribute.id")
 
 
+class StockEntry(Base):
+    """Stock on hand from Business Central (open Item Ledger Entries, Remaining Quantity), per item, location and lot.
+    Replaced as a whole by each download."""
+    __tablename__ = "stock"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    material_code: Mapped[str] = mapped_column(String(40), index=True)
+    location: Mapped[str] = mapped_column(String(20), index=True, default="")
+    lot: Mapped[str] = mapped_column(String(50), default="")
+    expiry: Mapped[date | None] = mapped_column(Date, nullable=True)
+    qty: Mapped[Decimal] = mapped_column(Numeric(14, 4), default=0)
+
+
 class MaterialAttribute(Base):
     __tablename__ = "material_attributes"
     __table_args__ = (UniqueConstraint("material_id", "name", name="uq_mat_attr"),)

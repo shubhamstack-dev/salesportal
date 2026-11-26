@@ -123,6 +123,19 @@ CREATE TABLE IF NOT EXISTS `material_attributes` (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 ;
 
+CREATE TABLE IF NOT EXISTS `stock` (
+  `id` int NOT NULL AUTO_INCREMENT,
+  `material_code` varchar(40) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `location` varchar(20) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `lot` varchar(50) COLLATE utf8mb4_unicode_ci NOT NULL,
+  `expiry` date DEFAULT NULL,
+  `qty` decimal(14,4) NOT NULL,
+  PRIMARY KEY (`id`),
+  KEY `ix_stock_material_code` (`material_code`),
+  KEY `ix_stock_location` (`location`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+;
+
 CREATE TABLE IF NOT EXISTS `prices` (
   `id` int NOT NULL AUTO_INCREMENT,
   `type` varchar(10) COLLATE utf8mb4_unicode_ci NOT NULL,

@@ -77,7 +77,7 @@ def cust_id(c, tok, code):
 def test_masters_are_read_only_and_downloaded(c, admin, masters):
     s = c.get("/api/integration/summary", headers=H(admin)).json()
     counts = {m["entity"]: m["count"] for m in s["masters"]}
-    assert counts == {"customers": 5, "materials": 6, "attributes": 16, "prices": 11, "hsn": 4, "charges": 3}
+    assert counts == {"customers": 5, "materials": 6, "attributes": 16, "prices": 11, "hsn": 4, "charges": 3, "stock": 0}
     for path in ["/api/customers", "/api/materials", "/api/prices", "/api/hsn", "/api/charges"]:
         assert c.post(path, json={"code": "X", "name": "X"}, headers=H(admin)).status_code == 405
     tea = next(m for m in c.get("/api/materials", headers=H(admin)).json() if m["code"] == "SF-TEA-250")
@@ -316,3 +316,21 @@ def test_order_to_invoices_and_payments(c, rep, admin):
     assert c.post(f"/api/docs/{i2['id']}/cancel", headers=H(admin)).json()["status"] == "cancelled"
     od = c.get(f"/api/docs/{o['id']}", headers=H(admin)).json()
     assert od["invoiced"] == "partial" and od["lines"][0]["to_invoice"] == 20 and od["can_invoice"]     # free to invoice again
+
+
+def test_stock_file_import_and_everyone_sees_it(c, admin, rep):
+    import io
+    from openpyxl import Workbook
+    wb = Workbook(); ws = wb.active
+    ws.append(["Item No.", "Location Code", "Lot No.", "Expiration Date", "Remaining Quantity"])
+    code = c.get("/api/materials", headers=H(admin)).json()[0]["code"]
+    ws.append([code, "LKO", "A1", "31-12-2027", 10]); ws.append([code, "LKO", "A1", "31-12-2027", 5]); ws.append([code, "KNP", "", "", 3])
+    buf = io.BytesIO(); wb.save(buf)
+    p = c.post("/api/integration/import/stock/file", files={"file": ("stock.xlsx", buf.getvalue())}, headers=H(admin)).json()
+    assert p["map"]["qty"] == "Remaining Quantity" and p["map"]["location"] == "Location Code"
+    r = c.post("/api/integration/import/stock/apply", json={"import_id": p["import_id"], "sheet": p["sheet"], "map": p["map"]}, headers=H(admin))
+    assert r.status_code == 200 and r.json()["added"] == 2, r.text
+    d = c.get("/api/stock", headers=H(rep)).json()                       # a sales rep can see the stock
+    row = next(x for x in d["rows"] if x["code"] == code)
+    assert row["by_loc"] == {"LKO": 15, "KNP": 3} and row["lots"][0]["expiry"] == "2027-12-31"
+    assert c.post("/api/stock/refresh", headers=H(rep)).status_code == 403

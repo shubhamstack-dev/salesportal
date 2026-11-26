@@ -9,6 +9,7 @@ import { DocList, DocEditor } from './pages/Docs'
 import { PaymentList, PaymentForm } from './pages/Payments'
 import Customers from './pages/Customers'
 import { Materials, Prices, Hsn, Charges } from './pages/Masters'
+import { Stock } from './pages/Stock'
 import { ExpenseList, ExpenseForm, Grades } from './pages/Expenses'
 import Employees from './pages/Employees'
 import Integration from './pages/Integration'
@@ -31,6 +32,7 @@ const NAV = [
   { id: 'grades', label: 'Expense policy', roles: ['admin'] },
   { grp: 'Masters from Dynamics' },
   { id: 'materials', label: 'Materials', roles: ALL },
+  { id: 'stock', label: 'Stock by location', roles: ALL },
   { id: 'prices', label: 'Price lists', roles: ['admin', 'manager'] },
   { id: 'hsn', label: 'HSN and GST', roles: ['admin', 'manager'] },
   { id: 'charges', label: 'Charges', roles: ['admin', 'manager'] },
@@ -168,7 +170,7 @@ function Shell({ me, setMe, onSignOut }) {
     quote: () => <DocEditor kind="quote" {...P} />, order: () => <DocEditor kind="order" {...P} />,
     payments: () => <PaymentList {...P} />, payment: () => <PaymentForm {...P} />, customers: () => <Customers {...P} />,
     expenses: () => <ExpenseList {...P} />, expense: () => <ExpenseForm {...P} />, grades: () => <Grades />,
-    materials: () => <Materials {...P} />, prices: () => <Prices {...P} />, hsn: () => <Hsn />, charges: () => <Charges />,
+    materials: () => <Materials {...P} />, prices: () => <Prices {...P} />, hsn: () => <Hsn />, charges: () => <Charges />, stock: () => <Stock {...P} />,
     employees: () => <Employees />, integration: () => <Integration />, settings: () => <Settings />,
   }
   const titles = { quote: route.arg === 'new' ? 'New quotation' : 'Edit quotation', order: route.arg === 'new' ? 'New sales order' : 'Edit sales order',

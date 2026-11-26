@@ -23,7 +23,7 @@ from openpyxl import load_workbook
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import (Charge, Customer, ExpenseClaim, HsnCode, Material, MaterialAttribute, Payment, Price, SalesDoc, User)
+from ..models import (Charge, Customer, ExpenseClaim, HsnCode, Material, MaterialAttribute, Payment, Price, SalesDoc, StockEntry, User)
 from .common import STATES, get_settings, now_utc, r2
 
 ENT = {
@@ -71,6 +71,12 @@ ENT = {
         "calc": ["Calculation Type", "Calculation", "Calc Type", "Type"], "value": ["Value", "Rate %", "Rate", "Percentage", "Charge %", "Amount"],
         "sign": ["Charge or Discount", "Add/Deduct", "Nature", "Sign"], "stage": ["Applied On", "Calculate On", "After GST", "Stage"],
         "auto": ["Mandatory", "Apply Always", "Auto", "Default"], "active": ["Active", "Blocked", "Status"]}},
+    "stock": {"label": "Stock by location", "hint": r"stock|inventor|ledger", "fields": {
+        "material": ["Item No.", "Item_No", "itemNumber", "Item", "No."],
+        "location": ["Location Code", "Location_Code", "locationCode", "Location"],
+        "qty": ["Remaining Quantity", "Remaining_Quantity", "Inventory", "Quantity on Hand", "Qty. on Hand", "Quantity"],
+        "lot": ["Lot No.", "Lot_No", "lotNumber", "Lot"], "expiry": ["Expiration Date", "Expiration_Date", "Expiry Date", "expirationDate"],
+        "open": ["Open", "open"]}},
 }
 
 # Uploaded rows wait here between the preview and Apply. A folder rather than memory, so it works with several
@@ -384,6 +390,27 @@ def apply_rows(db: Session, ent: str, rows: list[dict], m: dict, dry: bool, gst_
             db.query(Charge).delete()
             db.flush()
             db.add_all(fresh)
+    elif ent == "stock":
+        # open item ledger entries: added up per item, location, lot and expiry; closed entries and zero quantities left out
+        tot, known = {}, set(db.scalars(select(Material.code)))
+        for i, r in enumerate(rows):
+            code, qty = _s(get(r, "material")), _num(get(r, "qty"))
+            if not code:
+                skip(i, "no item number"); continue
+            if m.get("open") and not _yes(get(r, "open")):
+                continue
+            k = (code[:40], _s(get(r, "location")).upper()[:20], _s(get(r, "lot"))[:50], _date(get(r, "expiry")))
+            tot[k] = tot.get(k, 0) + qty
+        fresh = [StockEntry(material_code=k[0], location=k[1], lot=k[2], expiry=k[3], qty=round(q, 4)) for k, q in tot.items() if abs(q) > 0.00005]
+        res["added"] = len(fresh)
+        res["items"] = len({x.material_code for x in fresh})
+        unknown = sorted({x.material_code for x in fresh} - known)
+        if unknown:
+            res["errors"].append(f"{len(unknown)} items are not among the materials here (download materials first): {', '.join(unknown[:5])}")
+        if not dry:
+            db.query(StockEntry).delete()
+            db.flush()
+            db.add_all(fresh)
     return res
 
 
@@ -467,8 +494,28 @@ def odata_services(s: dict) -> list[dict]:
     return sorted(({"name": x.get("name"), "kind": x.get("kind", "")} for x in b.get("value", []) if x.get("name")), key=lambda x: x["name"].lower())
 
 
+def stock_endpoint(ep: str) -> str:
+    """Item Ledger Entries hold every movement; only the open ones (Remaining Quantity not zero) are stock, so they are
+    asked for that way unless the endpoint already has its own $filter."""
+    ep = (ep or "").strip()
+    if ep and re.search("ledger", ep, re.I) and "$filter" not in ep:
+        ep += ("&" if "?" in ep else "?") + "$filter=Open eq true"
+    return ep
+
+
+def location_names(s: dict, token: str) -> dict:
+    """Location code -> name, from the standard API (locations); empty when it cannot be read."""
+    try:
+        rows = api_call(s, token, "locations").get("value") or []
+    except HTTPException:
+        return {}
+    return {_s(x.get("code")).upper(): _s(x.get("displayName") or x.get("name")) for x in rows if x.get("code")}
+
+
 def api_pull(s: dict, ent: str, token: str | None = None, cache: dict | None = None) -> list[dict]:
     ep = s["dynamics"]["ep"].get(ent)
+    if ent == "stock":
+        ep = stock_endpoint(ep)
     if not ep:
         raise HTTPException(422, f"No API endpoint is set for {ENT[ent]['label'].lower()}. Set it under Dynamics connection.")
     token = token or access_token(s)
@@ -481,8 +528,8 @@ def api_pull(s: dict, ent: str, token: str | None = None, cache: dict | None = N
 
 
 REQUIRED = {"customers": ("code", "name"), "materials": ("code", "name"), "attributes": ("material", "name", "value"),
-            "prices": ("material", "price"), "hsn": ("code",), "charges": ("code", "name", "value")}
-PULL_ORDER = ("customers", "materials", "hsn", "attributes", "prices", "charges")
+            "prices": ("material", "price"), "hsn": ("code",), "charges": ("code", "name", "value"), "stock": ("material", "qty")}
+PULL_ORDER = ("customers", "materials", "hsn", "attributes", "prices", "charges", "stock")
 
 
 def api_map(s: dict, ent: str, headers: list[str]) -> dict:

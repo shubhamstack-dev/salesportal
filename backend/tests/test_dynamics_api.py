@@ -237,6 +237,8 @@ def fake_request(method, url, json=None, headers=None, **kw):
         return bc_create("quote", json)
     if method == "POST" and path == f"{BASE}/salesOrders":
         return bc_create("order", json)
+    if path == f"{BASE}/locations":
+        return _json(200, {"value": [{"code": "LKO", "displayName": "Lucknow Cold Store"}, {"code": "DEL", "displayName": "Delhi Depot"}]})
     if path == BASE:
         return _json(200, {"id": CID, "name": COMPANY, "displayName": "SAMURAI FOODS"})
     if path == f"{BASE}/customers":                      # standard API v2.0, used by Test connection
@@ -294,7 +296,7 @@ def test_connection_and_published_pages(c):
 
 def test_every_master_has_an_api_button(c):
     masters = {m["entity"]: m["api"] for m in c.get("/api/integration/summary").json()["masters"]}
-    assert masters == {k: True for k in ["customers", "materials", "attributes", "prices", "hsn", "charges"]}
+    assert masters == {**{k: True for k in ["customers", "materials", "attributes", "prices", "hsn", "charges"]}, "stock": False}
 
 
 def test_customers_with_gstin_state_and_paging(c):
@@ -316,7 +318,8 @@ def test_download_all_masters(c):
     r = c.post("/api/integration/pull-all")
     assert r.status_code == 200, r.text
     res = {x["entity"]: x for x in r.json()["results"]}
-    assert all(x["status"] in ("ok", "warning") for x in res.values()), res
+    assert all(x["status"] in ("ok", "warning") for k, x in res.items() if k != "stock"), res
+    assert res["stock"]["status"] == "skipped"                                      # no Stock endpoint set
     assert res["prices"]["added"] == 3 and res["prices"]["skipped"] == 2           # purchase and draft lines left out
     with SessionLocal() as db:
         assert db.query(Material).filter_by(code="SF-001-500").one().hsn == "16010000"
@@ -809,3 +812,43 @@ def test_journal_payments_post_negative_in_bc(c):
     BC_PAYMENTS.clear()
     c.post("/api/integration/push")
     assert BC_PAYMENTS and all(x["amount"] < 0 and x["journalAmount"] < 0 for x in BC_PAYMENTS), BC_PAYMENTS
+
+
+LEDGER = [   # open and closed Item Ledger Entries, as the published page 38 gives them
+    {"Entry_No": 1, "Item_No": "SF-001-500", "Location_Code": "LKO", "Lot_No": "L-OLD", "Expiration_Date": "2026-12-05", "Remaining_Quantity": 12, "Open": True},
+    {"Entry_No": 2, "Item_No": "SF-001-500", "Location_Code": "LKO", "Lot_No": "L-NEW", "Expiration_Date": "2027-06-30", "Remaining_Quantity": 30, "Open": True},
+    {"Entry_No": 3, "Item_No": "SF-001-500", "Location_Code": "DEL", "Lot_No": "L-NEW", "Expiration_Date": "2027-06-30", "Remaining_Quantity": 8, "Open": True},
+    {"Entry_No": 4, "Item_No": "SF-001-500", "Location_Code": "LKO", "Lot_No": "L-OLD", "Expiration_Date": "2026-12-05", "Remaining_Quantity": 0, "Open": False},
+    {"Entry_No": 5, "Item_No": "SF-002-500", "Location_Code": "DEL", "Lot_No": "", "Expiration_Date": "0001-01-01", "Remaining_Quantity": 5, "Open": True},
+    {"Entry_No": 6, "Item_No": "SF-002-500", "Location_Code": "DEL", "Lot_No": "", "Expiration_Date": "0001-01-01", "Remaining_Quantity": 2.5, "Open": True},
+]
+
+
+def test_stock_by_location_from_item_ledger(c, monkeypatch):
+    monkeypatch.setitem(PAGES, "ItemLedgerEntries", LEDGER)
+    connect(c, stock="")
+    assert c.post("/api/stock/refresh").status_code == 422          # no endpoint yet
+    assert c.get("/api/stock").json()["api"] is False
+    connect(c, stock="odata:ItemLedgerEntries")
+    calls.clear()
+    r = c.post("/api/stock/refresh").json()
+    assert r["lines"] == 4 and r["items"] == 2, r                  # closed entry left out, same lot/location added up
+    assert any("ItemLedgerEntries?$filter=Open eq true" in u for _, u in calls)
+    d = c.get("/api/stock").json()
+    assert d["synced"] and {x["code"]: (x["name"], x["qty"]) for x in d["locations"]} == {"LKO": ("Lucknow Cold Store", 42), "DEL": ("Delhi Depot", 15.5)}
+    k = {x["code"]: x for x in d["rows"]}
+    assert k["SF-001-500"]["total"] == 50 and k["SF-001-500"]["by_loc"] == {"LKO": 42, "DEL": 8}
+    assert [x["lot"] for x in k["SF-001-500"]["lots"]] == ["L-OLD", "L-NEW", "L-NEW"]        # earliest expiry first
+    assert k["SF-002-500"]["by_loc"] == {"DEL": 7.5} and k["SF-002-500"]["lots"] == []       # no lot, no expiry
+    d = c.get("/api/stock?location=lko").json()
+    assert [x["code"] for x in d["rows"]] == ["SF-001-500"] and d["rows"][0]["total"] == 42
+    assert {x["code"] for x in c.get("/api/stock?zero=true").json()["rows"]} >= {"SF-001-500", "SF-002-500", "SF-900"}
+    assert [x["code"] for x in c.get("/api/stock?q=garlic").json()["rows"]] == ["SF-002-500"]
+    stock = next(x for x in c.get("/api/integration/summary").json()["masters"] if x["entity"] == "stock")
+    assert stock["count"] == 4 and stock["api"] is True
+    # Download all includes it; nothing found keeps the old stock
+    res = {x["entity"]: x for x in c.post("/api/integration/pull-all").json()["results"]}
+    assert res["stock"]["status"] == "ok" and res["stock"]["added"] == 4
+    monkeypatch.setitem(PAGES, "ItemLedgerEntries", [])
+    assert c.post("/api/stock/refresh").status_code == 422
+    assert len(c.get("/api/stock").json()["rows"]) == 2
