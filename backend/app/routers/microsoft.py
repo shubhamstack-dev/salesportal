@@ -52,17 +52,27 @@ def redirect_uri(request: Request) -> str:
     return f"{proto}://{host.split(',')[0].strip()}/api/auth/microsoft/callback"
 
 
-def _back(**kv) -> RedirectResponse:
-    return RedirectResponse("/#" + urlencode({k: v for k, v in kv.items() if v}, quote_via=quote), status_code=302)
+# The mobile app opens /start?ret=<its own address>; the result goes back to the app instead of the web page.
+APP_SCHEMES = ("salesportal://", "exp://", "exps://")
+
+
+def app_return(ret: str) -> str:
+    return ret if ret and ret.startswith(APP_SCHEMES) and len(ret) < 300 else ""
+
+
+def _back(ret: str = "", **kv) -> RedirectResponse:
+    frag = urlencode({k: v for k, v in kv.items() if v}, quote_via=quote)
+    return RedirectResponse((app_return(ret) or "/") + "#" + frag, status_code=302)
 
 
 @router.get("/start")
-def start(request: Request, db: Session = Depends(get_db)):
+def start(request: Request, ret: str = "", db: Session = Depends(get_db)):
+    ret = app_return(ret)
     ms = ms_settings(db)
     if not ready(ms):
-        return _back(ms_error="Sign in with Microsoft is not set up. Ask your administrator.")
+        return _back(ret, ms_error="Sign in with Microsoft is not set up. Ask your administrator.")
     nonce = secrets.token_urlsafe(16)
-    state = jwt.encode({"n": nonce, "exp": int(time.time()) + STATE_MINUTES * 60, "p": "ms"}, JWT_SECRET, algorithm="HS256")
+    state = jwt.encode({"n": nonce, "exp": int(time.time()) + STATE_MINUTES * 60, "p": "ms", "r": ret}, JWT_SECRET, algorithm="HS256")
     q = {"client_id": ms["client_id"], "response_type": "code", "redirect_uri": redirect_uri(request), "response_mode": "query",
          "scope": "openid profile email", "state": state, "nonce": nonce, "prompt": "select_account"}
     return RedirectResponse(f"{LOGIN}/{ms['tenant_id'].strip()}/oauth2/v2.0/authorize?{urlencode(q)}", status_code=302)
@@ -158,20 +168,24 @@ def find_or_request(db: Session, ms: dict, claims: dict) -> tuple[User | None, s
 @router.get("/callback")
 def callback(request: Request, code: str = "", state: str = "", error: str = "", error_description: str = "",
              db: Session = Depends(get_db)):
+    try:                                     # where to send the result: the app's address, kept in the signed state
+        ret = app_return(jwt.decode(state, JWT_SECRET, algorithms=["HS256"], options={"verify_exp": False}).get("r", ""))
+    except jwt.PyJWTError:
+        ret = ""
     if error:
         msg = "Microsoft sign-in was cancelled." if error == "access_denied" else f"Microsoft sign-in failed: {error_description or error}"
-        return _back(ms_error=msg[:300])
+        return _back(ret, ms_error=msg[:300])
     ms = ms_settings(db)
     if not ready(ms):
-        return _back(ms_error="Sign in with Microsoft is not set up.")
+        return _back(ret, ms_error="Sign in with Microsoft is not set up.")
     try:
         st = jwt.decode(state, JWT_SECRET, algorithms=["HS256"])
         if st.get("p") != "ms":
             raise jwt.PyJWTError()
     except jwt.ExpiredSignatureError:
-        return _back(ms_error="The Microsoft sign-in took too long. Try again.")
+        return _back(ret, ms_error="The Microsoft sign-in took too long. Try again.")
     except jwt.PyJWTError:
-        return _back(ms_error="The Microsoft sign-in did not come from this portal. Try again.")
+        return _back(ret, ms_error="The Microsoft sign-in did not come from this portal. Try again.")
     try:
         r = httpx.post(f"{LOGIN}/{ms['tenant_id'].strip()}/oauth2/v2.0/token", timeout=30, data={
             "grant_type": "authorization_code", "client_id": ms["client_id"], "client_secret": ms["client_secret"], "code": code,
@@ -182,11 +196,11 @@ def callback(request: Request, code: str = "", state: str = "", error: str = "",
         claims = check_id_token(body["id_token"], ms, st["n"])
         user, msg = find_or_request(db, ms, claims)
     except MsError as e:
-        return _back(ms_error=str(e))
+        return _back(ret, ms_error=str(e))
     except httpx.HTTPError as e:
-        return _back(ms_error=f"Could not reach Microsoft ({e}).")
+        return _back(ret, ms_error=f"Could not reach Microsoft ({e}).")
     if msg == "REQUESTED":
-        return _back(ms_info="Registration sent. You can sign in with Microsoft once an administrator approves it.")
+        return _back(ret, ms_info="Registration sent. You can sign in with Microsoft once an administrator approves it.")
     if not user:
-        return _back(ms_error=msg)
-    return _back(ms_token=make_token(user))
+        return _back(ret, ms_error=msg)
+    return _back(ret, ms_token=make_token(user))
